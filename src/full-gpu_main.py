@@ -1061,15 +1061,19 @@ def main() -> None:
     logger.info("[Step 2/3] llama-server ready ✓", url=LLAMA_SERVER_BASE_URL)
 
     # ----------------------------------------------------------------------------------------------
-    # Warmup — ensure CUDA kernels are compiled and caches are primed BEFORE timing begins.
-    # Without this, the first image pays a one-time penalty (TensorRT kernel JIT, llama-server
-    # prompt-processing cold-start) that inflates its timing relative to subsequent images.
+    # Warmup — YOLO TensorRT kernel compilation.
+    #
+    # TensorRT JIT-compiles CUDA kernels on the first inference for the current GPU architecture.
+    # Without this warmup, image #1's yolo_ms would be inflated by the one-time compilation cost.
+    #
+    # NOTE: llama-server does NOT need manual warmup — it performs an automatic empty-inference
+    # warmup pass during boot (before /models returns 200).  Since ensure_llama_server_running()
+    # polls /models, Qwen3.6 is already fully warmed up by the time we reach this point.
+    # To disable the built-in warmup one would pass --no-warmup (we don't).
     # ----------------------------------------------------------------------------------------------
-    logger.info("[Warmup] Running YOLO + llama-server warmup passes…")
+    logger.info("[Warmup] Running YOLO TensorRT warmup pass…")
     warmup_start = time.perf_counter()
 
-    # --- YOLO TensorRT warmup: run a dummy image through the engine so TensorRT compiles
-    #     and caches all CUDA kernels for the current GPU.
     try:
         dummy_image: np.ndarray = np.zeros((640, 640, 3), dtype=np.uint8)
         yolo_obb_model.predict(source=dummy_image, device=0, verbose=False)
@@ -1077,28 +1081,6 @@ def main() -> None:
     except Exception as exc:
         logger.warning(
             "[Warmup] YOLO warmup failed (non-fatal — first image may be slower)",
-            error=str(exc),
-        )
-
-    # --- llama-server warmup: send a trivial text-only request to force Qwen3.6 to
-    #     allocate its KV cache and run at least one forward pass through all GPU layers.
-    try:
-        warmup_payload: dict = {
-            "model": QWEN_MODEL_API_NAME,
-            "messages": [{"role": "user", "content": "Hi"}],
-            "max_tokens": 1,
-            "temperature": 0.0,
-        }
-        warmup_response = httpx.post(
-            f"{LLAMA_SERVER_BASE_URL}/chat/completions",
-            json=warmup_payload,
-            timeout=httpx.Timeout(60.0),
-        )
-        warmup_response.raise_for_status()
-        logger.info("[Warmup] llama-server Qwen3.6 forward pass complete ✓")
-    except Exception as exc:
-        logger.warning(
-            "[Warmup] llama-server warmup failed (non-fatal — first image may be slower)",
             error=str(exc),
         )
 
