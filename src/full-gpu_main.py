@@ -44,7 +44,10 @@ WARNING: Do NOT use CUDA 13.2 — known bug causes gibberish outputs.
 # --------------------------------------------------------------------------------------------------
 # Early startup message — printed before heavy imports so the terminal isn't silent
 # during the ~30-60 s PyTorch + CUDA initialisation phase.
+# We import time early (stdlib, instant) to capture the timestamp.
 # --------------------------------------------------------------------------------------------------
+import time as _time_module
+_IMPORT_START_MONOTONIC: float = _time_module.perf_counter()
 print("\n⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… this takes 30-60 s on first launch.")
 
 # --------------------------------------------------------------------------------------------------
@@ -998,10 +1001,12 @@ def main() -> None:
         5. Save per-image cropped labels and transcripts.
         6. Write a summary markdown report with timing statistics.
     """
+    import_elapsed_sec: float = time.perf_counter() - _IMPORT_START_MONOTONIC
     logger.info(
         "Starting full-GPU pipeline",
         gguf_model=QWEN_GGUF_WEIGHTS_FILENAME,
         ean_detection=ENABLE_EAN_DETECTION,
+        import_time=f"{import_elapsed_sec:.1f}s",
     )
 
     # ----------------------------------------------------------------------------------------------
