@@ -376,16 +376,27 @@ ottimizzato per massima velocità e include tutte le configurazioni GPU automati
 | EAN detection | Sempre | Opzionale (env var) |
 | GGUF model | Hardcoded Q4_K_M | Configurabile via env var |
 
-### 8b. Variabili d'ambiente
+### 8b. Configurazione (`.env`)
+
+Entrambi gli script (`main.py` e `full-gpu_main.py`) leggono la configurazione
+da un file `.env` nella root del progetto. Copiare il template e personalizzare:
 
 ```bash
-# Scegli quale quantizzazione usare (default: UD-Q4_K_XL)
-export QWEN_GGUF_FILE="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"   # Unsloth Dynamic 2.0 (raccomandato)
-# export QWEN_GGUF_FILE="Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"  # Standard Q4_K_M (alternativa)
-
-# Opzionale: disabilitare ricerca EAN barcode (risparmio ~5-10 ms/immagine)
-# export ENABLE_EAN_DETECTION=false
+cp .env.example .env
+# Editare .env con i valori desiderati
 ```
+
+Contenuto di `.env`:
+
+```ini
+# Modello GGUF (default: UD-Q4_K_XL — Unsloth Dynamic 2.0, raccomandato)
+QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+
+# Abilitare/disabilitare ricerca EAN barcode (default: true)
+ENABLE_EAN_DETECTION=true
+```
+
+Le variabili d'ambiente impostate via shell (`export`) hanno **precedenza** su `.env`.
 
 ### 8c. Disabilitare la ricerca barcode (EAN)
 

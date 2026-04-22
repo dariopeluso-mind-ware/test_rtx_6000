@@ -63,6 +63,13 @@ import cv2                                     # OpenCV – used for affine desk
 from PIL import Image as PILImage              # Pillow – used by pyzbar for barcode decoding
 from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
+from dotenv import load_dotenv
+
+# --------------------------------------------------------------------------------------------------
+# Load .env file (if present) — must happen before any os.environ.get() calls below.
+# Variables set via shell export take precedence over .env values.
+# --------------------------------------------------------------------------------------------------
+load_dotenv()
 
 # --------------------------------------------------------------------------------------------------
 # Module-level constants
