@@ -155,7 +155,7 @@ PYZBAR_MAX_DIMENSION: int = 1500
 
 # Resize crop to this max dimension before base64 encoding.
 # Smaller images = less base64 data = faster prefill in llama-server.
-CROP_MAX_DIMENSION: int = 1280
+CROP_MAX_DIMENSION: int = int(os.environ.get("CROP_MAX_DIMENSION", "1280"))
 
 # JPEG quality for in-memory encoding (0-100, higher = larger file + more quality)
 CROP_JPEG_QUALITY: int = 90
@@ -181,7 +181,9 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # --- YOLO model paths ---
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
-YOLO_IMG_SIZE: int = 640                     # Must match TensorRT engine export size
+YOLO_IMG_SIZE: int = int(os.environ.get(      # Must match TensorRT engine export size
+    "YOLO_IMG_SIZE", "640"
+))
 
 # --------------------------------------------------------------------------------------------------
 # Global state – shared across function calls without passing as arguments.
