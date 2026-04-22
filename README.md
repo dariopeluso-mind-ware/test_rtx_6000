@@ -163,10 +163,17 @@ git clone https://github.com/<org>/<repo>.git
 cd <repo>       # entrare nella cartella del progetto
 ```
 
+Clonare llama.cpp all'interno del progetto (repo separato, non incluso nel progetto):
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+# Commit verificato: 1f30ac0ce
+```
+
 > In tutto il resto di questa guida, i comandi assumono che la working directory
 > sia la root del progetto (la cartella in cui si trova `requirements.txt`).
 
-Struttura dei file:
+Struttura dei file dopo il clone:
 
 ```txt
 <repo>/
@@ -177,18 +184,15 @@ Struttura dei file:
 │   ├── main.py            # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
 │   └── full-gpu_main.py   # Script prod (96 GB VRAM, full GPU, TensorRT, thinking OFF)
 ├── test/                  # Immagini di input per batch processing
-├── llama.cpp/             # Repository llama.cpp (source)
+├── llama.cpp/             # Clonato separatamente (https://github.com/ggml-org/llama.cpp)
 ├── requirements.txt       # Dipendenze Python
 └── output/                # Output processing (generato)
 ```
 
-**Nota**: la directory `llama.cpp/` è un repository standalone
-(`https://github.com/ggml-org/llama.cpp`, commit verificato `1f30ac0ce`).
-
 Verificare che i file essenziali siano presenti:
 
 ```bash
-ls -lh best.onnx best.pt src/main.py requirements.txt
+ls -lh best.onnx best.pt src/main.py requirements.txt llama.cpp/CMakeLists.txt
 # Tutti i file devono essere presenti
 ```
 
@@ -681,8 +685,9 @@ echo 'export PATH=$CUDA_HOME/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
-# 3. Clone del progetto
+# 3. Clone del progetto + llama.cpp
 git clone https://github.com/<org>/<repo>.git && cd <repo>
+git clone https://github.com/ggml-org/llama.cpp.git
 
 # 4. Python environment
 python3 -m venv .venv && source .venv/bin/activate
