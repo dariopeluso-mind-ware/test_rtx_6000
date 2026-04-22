@@ -1,13 +1,25 @@
 # 1_Riprezzamento-con-foto — Deployment Guide
 
 > Pipeline per l'estrazione automatica di etichette alimentari da fotografie:
-> **YOLO OBB** (crop etichetta) → **Qwen3.6‑35B‑A3B** (OCR vision via llama‑server)
-> → dati strutturati.
+> **YOLO OBB** (crop etichetta) → **Qwen3.6‑35B‑A3B** (OCR vision) → dati strutturati.
+
+## Backend OCR disponibili
+
+Questo progetto offre **due backend OCR** alternativi, entrambi compatibili con Qwen3.6-35B-A3B:
+
+| Backend | Script | VRAM | Velocità | Note |
+|---------|--------|------|----------|------|
+| llama.cpp | `src/full-gpu_main.py` | 96 GB | ~1.3–2.0 s/img | Più semplice, no build extra |
+| **vLLM** | `src/vllm_main.py` | 96 GB | **< 1 s/img** | Target principale |
+
+Questo documento copre entrambi i backend. La Sezione 9 è dedicata a vLLM.
+
+---
 
 ## Hardware di riferimento
 
 | Ambiente | GPU | VRAM | Note |
-| ---------- | ----- | ------ | ------ |
+|----------|-----|------|------|
 | Development (locale) | RTX PRO 1000 Blackwell | 8 GB | Configurazione attuale |
 | Cloud target | RTX 6000 PRO Blackwell | 96 GB | Deployment remoto via SSH |
 
@@ -22,12 +34,13 @@ Questo documento descrive come replicare l'ambiente sulla macchina cloud RTX 600
 3. [CUDA Toolkit 12.8 / 13.x](#3-cuda-toolkit-128--13x)
 4. [Setup del progetto](#4-setup-del-progetto)
 5. [Environment Python](#5-environment-python)
-6. [Build di llama.cpp con CUDA](#6-build-di-llamacpp-con-cuda)
-7. [Pre-download dei pesi GGUF](#7-pre-download-dei-pesi-gguf)
-8. [Esecuzione Full-GPU (96 GB VRAM)](#8-esecuzione-full-gpu-96-gb-vram)
-9. [Esecuzione della pipeline](#9-esecuzione-della-pipeline)
-10. [Recupero dei risultati](#10-recupero-dei-risultati)
-11. [Troubleshooting](#11-troubleshooting)
+6. [Build di llama.cpp con CUDA](#6-build-di-llamacpp-con-cuda) *(solo per `full-gpu_main.py`)*
+7. [Pre-download dei pesi GGUF](#7-pre-download-dei-pesi-gguf) *(solo per `full-gpu_main.py`)*
+8. [Esecuzione Full-GPU llama.cpp (96 GB VRAM)](#8-esecuzione-full-gpu-llamacpp-96-gb-vram)
+9. **[Esecuzione vLLM (target < 1 s/immagine)](#9-esecuzione-vllm-target-1-s-immagine)**
+10. [Esecuzione della pipeline](#10-esecuzione-della-pipeline)
+11. [Recupero dei risultati](#11-recupero-dei-risultati)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -114,7 +127,7 @@ sudo apt update
 # Installa CUDA Toolkit 13.0 (include nvcc) — NON 13.2!
 sudo apt install -y cuda-toolkit-13-0
 
-# Oppure CUDA 12.8 (più stabile, supporta comunque sm_120)
+# oppure CUDA 12.8 (più stabile, supporta comunque sm_120)
 # sudo apt install -y cuda-toolkit-12-8
 ```
 
@@ -136,17 +149,6 @@ source ~/.bashrc
 ```bash
 nvcc --version
 # Output atteso: Cuda compilation tools, release 13.0, V13.0.x
-
-# Verifica supporto sm_120
-cat $CUDA_HOME/include/cuda_arch_sm.h 2>/dev/null | grep -c "sm_120" || echo "sm_120 supportato da nvcc 13.0"
-```
-
-Se `nvcc --version` mostra una versione inferiore a 12.8, verificare che `$CUDA_HOME/bin/nvcc` sia quello corretto:
-
-```bash
-which nvcc
-/usr/local/cuda/bin/nvcc --version   # verificare che non sia un vecchio link
-/usr/local/cuda-13.0/bin/nvcc --version  # deve mostrare 13.0
 ```
 
 ---
@@ -157,21 +159,20 @@ Clonare il repository sulla macchina remota:
 
 ```bash
 # Scegli la directory di lavoro (es. /workspace su RunPod, ~ su server dedicati)
-cd /workspace   # oppure: cd ~
+cd /workspace
 
 git clone https://github.com/<org>/<repo>.git
-cd <repo>       # entrare nella cartella del progetto
+cd <repo>
 ```
 
-Clonare llama.cpp all'interno del progetto (repo separato, non incluso nel progetto):
+Clonare llama.cpp all'interno del progetto (solo per `full-gpu_main.py`; NON necessario per `vllm_main.py`):
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git
 # Commit verificato: 1f30ac0ce
 ```
 
-> In tutto il resto di questa guida, i comandi assumono che la working directory
-> sia la root del progetto (la cartella in cui si trova `requirements.txt`).
+> **Per `vllm_main.py`**: llama.cpp non è necessario — vLLM gestisce tutto internamente.
 
 Struttura dei file dopo il clone:
 
@@ -179,21 +180,15 @@ Struttura dei file dopo il clone:
 <repo>/
 ├── best.onnx              # YOLO OBB model (~38 MB)
 ├── best.pt               # YOLO PyTorch model (~21 MB) — usato per export TensorRT
-├── best.engine            # YOLO TensorRT FP16 (generato al primo avvio di full-gpu_main.py)
+├── best.engine            # YOLO TensorRT FP16 (generato al primo avvio)
 ├── src/
 │   ├── main.py            # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
-│   └── full-gpu_main.py   # Script prod (96 GB VRAM, full GPU, TensorRT, thinking OFF)
+│   ├── full-gpu_main.py  # Script llama.cpp (96 GB VRAM, full GPU, TensorRT)
+│   └── vllm_main.py      # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img) ⭐
 ├── test/                  # Immagini di input per batch processing
-├── llama.cpp/             # Clonato separatamente (https://github.com/ggml-org/llama.cpp)
+├── llama.cpp/             # Solo per full-gpu_main.py (clonato separatamente)
 ├── requirements.txt       # Dipendenze Python
 └── output/                # Output processing (generato)
-```
-
-Verificare che i file essenziali siano presenti:
-
-```bash
-ls -lh best.onnx best.pt src/main.py requirements.txt llama.cpp/CMakeLists.txt
-# Tutti i file devono essere presenti
 ```
 
 ---
@@ -218,22 +213,22 @@ Se `requirements.txt` non è disponibile:
 
 ```bash
 pip install \
-    ultralytics==8.4.37 \
-    httpx==0.28.1 \
-    pyzbar==0.1.9 \
-    pillow==12.2.0 \
-    structlog==25.5.0 \
-    huggingface_hub==0.36.2 \
-    onnxruntime-gpu==1.23.2 \
-    opencv-python-headless==4.10.0.84 \
-    numpy>=1.24.0 \
-    onnx==1.21.0
+    ultralytics>=8.4.0 \
+    httpx>=0.28.0 \
+    pyzbar>=0.1.9 \
+    pillow>=12.0.0 \
+    structlog>=25.0.0 \
+    huggingface-hub>=0.28.0 \
+    opencv-python-headless>=4.10.0 \
+    numpy>=1.24.0
+
+# Per full-gpu_main.py (llama.cpp): pip install onnxruntime-gpu>=1.23.0
+# Per vllm_main.py: pip install vllm>=0.19.0
 ```
 
 **Note importanti**:
 
 - **`opencv-python-headless`**: versione headless (senza GUI), necessaria su server headless. Non installare `opencv-python`.
-- **`onnxruntime-gpu`**: usa la GPU per inferenza ONNX. Se preferisci CPU-only, usa `onnxruntime`.
 - **`pyzbar`**: richiede `libzbar0` installato a livello sistema (cfr. Sezione 2).
 
 ### Verifica dell'installazione
@@ -242,26 +237,17 @@ pip install \
 python -c "import ultralytics; import httpx; import pyzbar; import PIL; import structlog; print('✓ Tutte le dipendenze importabili')"
 ```
 
-Se `pyzbar` dà errore "Unable to find zbar shared library", reinstallare:
-
-```bash
-sudo apt install libzbar0-dev
-pip uninstall pyzbar -y && pip install pyzbar==0.1.9
-```
-
 ---
 
-## 6. Build di llama.cpp con CUDA
+## 6. Build di llama.cpp con CUDA *(solo per `full-gpu_main.py`)*
 
 ### 6a. Configurazione CMake
 
 ```bash
-# Dalla root del progetto
 cd llama.cpp
 
-# Verifica che CUDA sia nel PATH
 echo $CUDA_HOME
-# Deve mostrare: /usr/local/cuda-13.0 (o /usr/local/cuda-12.8)
+# Deve mostrare: /usr/local/cuda-13.0
 
 cmake -B build \
     -DGGML_CUDA=ON \
@@ -271,26 +257,10 @@ cmake -B build \
     -DLLAMA_SERVER_VERBOSE=OFF
 ```
 
-**Significato dei flag**:
-
-| Flag | Valore | Descrizione |
-| ------ | -------- | ------------- |
-| `GGML_CUDA=ON` | Abilita | Abilita il supporto CUDA per GGML |
-| `CMAKE_CUDA_ARCHITECTURES=120` | sm_120 | Compila kernel per Blackwell (RTX 6000 PRO / RTX PRO 1000) |
-| `CMAKE_BUILD_TYPE=Release` | Ottimizzato | Flag `-O3`, nessun debug symbol |
-| `LLAMA_CURL=OFF` | Disabilitato | Disabilita download interno (usiamo huggingface_hub) |
-
 ### 6b. Compilazione
 
 ```bash
 cmake --build build --config Release -j$(nproc) --target llama-server
-```
-
-Sul cloud con 96 GB VRAM e 32+ core CPU, usa parallelism massimo:
-
-```bash
-# Con 32 thread
-cmake --build build --config Release -j32 --target llama-server
 ```
 
 Tempo stimato: **5–15 minuti** su una macchina cloud con 32+ core.
@@ -300,27 +270,19 @@ Tempo stimato: **5–15 minuti** su una macchina cloud con 32+ core.
 ```bash
 cp build/bin/llama-server .
 ls -lh llama-server
-# Verifica: file eseguibile (~9 MB con linking dinamico)
-```
-
-### 6d. Test rapido del binario
-
-```bash
-./llama-server --help 2>&1 | head -20
-# Deve mostrare usage info senza errori CUDA
 ```
 
 ---
 
-## 7. Pre-download dei pesi GGUF
+## 7. Pre-download dei pesi GGUF *(solo per `full-gpu_main.py`)*
 
-I pesi vengono scaricati automaticamente da `src/full-gpu_main.py` (o `main.py`) alla prima esecuzione tramite `huggingface_hub`.
+I pesi vengono scaricati automaticamente alla prima esecuzione tramite `huggingface_hub`.
 Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è **pubblico** — non serve login né token HuggingFace.
 
 Per evitare attese durante il primo run, pre-scaricarli manualmente:
 
 ```bash
-# Download del modello principale (UD-Q4_K_XL — raccomandato per full-gpu_main.py)
+# Download del modello principale (UD-Q4_K_XL — raccomandato)
 hf download \
     unsloth/Qwen3.6-35B-A3B-GGUF \
     Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
@@ -333,28 +295,16 @@ hf download \
 
 **Dimensione stimata**: ~22 GB totali (modello + mmproj).
 
-### Cache location
-
-I file vengono memorizzati nella cache HuggingFace:
-
-```bash
-ls ~/.cache/huggingface/hub/
-# Cerca: models--unsloth--Qwen3.6-35B-A3B-GGUF
-```
-
-Il path usato da `hf_hub_download` è trasparente, lo script lo gestisce automaticamente.
-
 ---
 
-## 8. Esecuzione Full-GPU (96 GB VRAM)
+## 8. Esecuzione Full-GPU llama.cpp (96 GB VRAM)
 
-Con 96 GB VRAM, usare `src/full-gpu_main.py` al posto di `src/main.py`. Questo script è
-ottimizzato per massima velocità e include tutte le configurazioni GPU automaticamente.
+Con 96 GB VRAM, usare `src/full-gpu_main.py` al posto di `src/main.py`.
 
 ### 8a. Differenze rispetto a `main.py`
 
 | Feature | `main.py` (dev, 8 GB) | `full-gpu_main.py` (prod, 96 GB) |
-| --------- | ---------------------- | ---------------------------------- |
+|---------|------------------------|-----------------------------------|
 | MoE experts | CPU (`--cpu-moe`) | GPU (tutti i 256 esperti in VRAM) |
 | YOLO inference | ONNX su CPU | TensorRT FP16 su GPU |
 | Thinking mode | Abilitato | Disabilitato (`--chat-template-kwargs`) |
@@ -367,127 +317,232 @@ ottimizzato per massima velocità e include tutte le configurazioni GPU automati
 | EAN detection | Sempre | Opzionale (env var) |
 | GGUF model | Hardcoded Q4_K_M | Configurabile via env var |
 
-### 8b. Configurazione (`.env`)
+### 8b. Ottimizzazioni applicate (`full-gpu_main.py`)
 
-Entrambi gli script (`main.py` e `full-gpu_main.py`) leggono la configurazione
-da un file `.env` nella root del progetto. Copiare il template e personalizzare:
+Le seguenti ottimizzazioni sono già integrate in `full-gpu_main.py`:
+
+| Ottimizzazione | Impatto stimato |
+|---------------|----------------|
+| Immagine caricata 1 volta (non 3) | ~100 ms/immagine |
+| Barcode pyzbar downscaled a 1500px | ~600 ms/immagine |
+| YOLO TensorRT con imgsz=1024 (kernel ottimizzati) | ~400 ms/immagine |
+| llama-server: `--batch-size 2048 --ubatch-size 512 -t 8` | ~15-25% OCR |
+| Greedy sampling (temperature=0.0, top_k=1) | ~10-20% OCR |
+| Persistent httpx.Client (connection reuse) | ~5-10% OCR |
+
+**Stima totale con llama.cpp**: ~1.3–2.0 s/immagine (dopo warmup)
+
+### 8c. Configurazione (`.env`)
 
 ```bash
 cp .env.example .env
-# Editare .env con i valori desiderati
 ```
 
 Contenuto di `.env`:
 
 ```ini
-# Modello GGUF (default: UD-Q4_K_XL — Unsloth Dynamic 2.0, raccomandato)
+# Modello GGUF (default: UD-Q4_K_XL)
 QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 
 # Abilitare/disabilitare ricerca EAN barcode (default: true)
 ENABLE_EAN_DETECTION=true
 ```
 
-Le variabili d'ambiente impostate via shell (`export`) hanno **precedenza** su `.env`.
-
-### 8c. Disabilitare la ricerca barcode (EAN)
-
-Per default, la pipeline cerca codici EAN/UPC in ogni immagine tramite `pyzbar`.
-Se non ti interessa il codice EAN (es. stai solo facendo OCR delle etichette),
-puoi disabilitare questa fase per risparmiare ~5-10 ms per immagine:
+### 8d. Esecuzione
 
 ```bash
-# Disabilita EAN barcode detection
-export ENABLE_EAN_DETECTION=false
-python3 src/full-gpu_main.py
-
-# Oppure inline:
-ENABLE_EAN_DETECTION=false python3 src/full-gpu_main.py
-```
-
-Quando disabilitato:
-
-- Il campo `EAN` nel report sarà sempre `None`
-- La rotazione barcode-based sarà sempre `0°`
-- Lo step "Barcode" nel timing sarà ~0 ms
-
-Per riabilitarlo, basta non impostare la variabile o impostarla a `true`:
-
-```bash
-export ENABLE_EAN_DETECTION=true   # o semplicemente non impostarla
-```
-
-### 8d. Note importanti
-
-- Il modello GGUF viene scaricato automaticamente al primo avvio (~22 GB, potrebbe richiedere diversi minuti)
-- L'engine TensorRT (`best.engine`) viene generato automaticamente al primo avvio da `best.pt` (~1-2 min)
-- L'engine TensorRT è specifico per la GPU: se cambi GPU, cancella `best.engine` e riesegui
-- Il thinking mode è disabilitato tramite `--chat-template-kwargs '{"enable_thinking":false}'`
-  come da [documentazione ufficiale Unsloth](https://unsloth.ai/docs/models/qwen3.6#how-to-enable-or-disable-thinking)
-
-### 8e. Verifica carico VRAM
-
-Dopo aver avviato lo script, monitora la VRAM:
-
-```bash
-watch -n 2 nvidia-smi
-# Verifica che la memoria allocata sia ~30-33 GB (modello + KV cache + YOLO)
-# Deve stare comodamente nei 96 GB disponibili
-```
-
----
-
-## 9. Esecuzione della pipeline
-
-### 9a. Avvio in tmux (consigliato)
-
-```bash
-# Dalla root del progetto
-
-# Crea una nuova sessione tmux
-tmux new -s tosano
-
-# Attiva il venv
 source .venv/bin/activate
-
-# --- PRODUCTION (96 GB VRAM) ---
 python3 src/full-gpu_main.py
-
-# --- DEVELOPMENT (8 GB VRAM) ---
-# python3 src/main.py
 ```
 
 **Nota**: `llama-server` viene avviato automaticamente se non è già in ascolto su port 8080.
 Il primo avvio scaricherà il modello GGUF (~22 GB) e genererà l'engine TensorRT (~1-2 min).
 Log disponibile in: `output/llama_server.log`.
 
-### 9a.1 Test A/B quantizzazione
+---
+
+## 9. Esecuzione vLLM (target < 1 s/immagine)
+
+> **Questa è la configurazione raccomandata per il target < 1 secondo per immagine.**
+
+### 9a. Perché vLLM
+
+vLLM offre funzionalità non disponibili in llama.cpp che accelerano drasticamente l'OCR:
+
+| Feature vLLM | Beneficio per OCR |
+|--------------|-------------------|
+| **PagedAttention v2** | KV cache in 4KB page — fino a 40% riduzione memoria |
+| **Chunked Prefill** | Evita prefill/decode conflict in batch misti |
+| **Prefix Caching** | System prompt KV cache riutilizzato per tutte le immagini |
+| **Continuous Batching** | Schedulazione dinamica a livello di iterazione |
+| **FP8 nativo Blackwell** | Tensor core nativi per BF16 (il modello gira così) |
+| **Reasoning parser** | Supporto nativo per Qwen3.6 |
+
+**Stima con vLLM**: **< 1 s/immagine** (dopo warmup, per immagini etichetta typicali)
+
+### 9b. Installazione di vLLM
 
 ```bash
-# Test con UD-Q4_K_XL (default)
-QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf python3 src/full-gpu_main.py
+source .venv/bin/activate
 
-# Test con Q4_K_M standard
-QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf python3 src/full-gpu_main.py
-
-# Confronta i timing nei report generati:
-diff output_test/mocr_batch_results.md output_test_q4km/mocr_batch_results.md
+# vLLM >= 0.19.0 richiesto per Qwen3.6-35B-A3B
+pip install vllm>=0.19.0
 ```
 
-### 9b. Monitoraggio in tempo reale
+**Requisiti aggiuntivi** (installati automaticamente da vLLM):
+- PyTorch con supporto CUDA
+- Triton compiler
+
+**Nota**: vLLM gestisce autonomamente i pesi del modello — **nessun build manuale necessario**.
+
+### 9c. Modello
+
+Il modello è `Qwen/Qwen3.6-35B-A3B` (repo ufficiale HuggingFace).
+vLLM scaricherà automaticamente i pesi alla prima esecuzione.
+
+**Dimensione**: ~72 GB (pesi BF16 in safetensors)
+
+Per pre-scaricare (consigliato):
 
 ```bash
-# In un altro pannello tmux, monitora i log
-tail -f output/llama_server.log
-
-# Oppure monitora GPU + processo
-watch -n 1 "nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader && echo '---' && ps aux | grep llama-server | grep -v grep"
+# Con huggingface-cli
+huggingface-cli download Qwen/Qwen3.6-35B-A3B
 ```
 
-### 9c. Output atteso
+### 9d. Configurazione (`.env`)
 
-Dopo l'esecuzione:
+```bash
+# Aggiungere a .env (o creare .env con solo queste variabili)
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_PORT=8001
+VLLM_TENSOR_PARALLEL_SIZE=1
+```
 
-```txt
+**.env completo per vLLM**:
+
+```ini
+# ── vLLM settings ──────────────────────────────
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_PORT=8001
+VLLM_TENSOR_PARALLEL_SIZE=1
+
+# ── Pipeline settings ─────────────────────────
+ENABLE_EAN_DETECTION=true
+SAVE_CROPS=false
+YOLO_IMG_SIZE=1024
+CROP_MAX_DIMENSION=1280
+```
+
+### 9e. Comandi vLLM (dalla model card ufficiale)
+
+Il comando vLLM dalla [model card ufficiale HuggingFace](https://huggingface.co/Qwen/Qwen3.6-35B-A3B):
+
+```bash
+vllm serve Qwen/Qwen3.6-35B-A3B \
+  --port 8000 \
+  --tensor-parallel-size 1 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.85 \
+  --max-num-seqs 8 \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --reasoning-parser qwen3
+```
+
+**Flag importanti**:
+- `--reasoning-parser qwen3`: obbligatorio per Qwen3.6
+- `--enable-chunked-prefill`: accelera il prefill delle immagini
+- `--enable-prefix-caching`: sistema prompt riutilizzato nella KV cache
+- `--gpu-memory-utilization 0.85`: lascia 15% VRAM per YOLO + OS
+
+### 9f. Esecuzione di `vllm_main.py`
+
+```bash
+source .venv/bin/activate
+
+# Esecuzione (vLLM viene avviato automaticamente se non già in ascolto)
+python3 src/vllm_main.py
+```
+
+Il primo avvio:
+1. Scaricherà il modello Qwen3.6-35B-A3B (~72 GB, varios minuti)
+2. Avvierà vLLM server su port 8001
+3. Caricherà il modello in VRAM
+4. Compilerà i kernel TensorRT per YOLO
+
+Log vLLM: `output/vllm_server.log`
+
+### 9g. Verifica che vLLM sia pronto
+
+```bash
+# Check modelli disponibili
+curl http://localhost:8001/v1/models
+
+# Checkhealth
+curl http://localhost:8001/health
+```
+
+### 9h. Output atteso
+
+```
+⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… this takes 30-60 s on first launch.
+...
+2026-04-22 12:00:00 [info] [Step 1/3] YOLO OBB ready ✓
+2026-04-22 12:00:05 [info] [Step 2/3] vLLM server ready ✓ url=http://localhost:8001/v1
+2026-04-22 12:00:07 [info] [Warmup] All models warm and ready ✓
+2026-04-22 12:00:07 [info] [Step 3/3] Starting batch processing
+2026-04-22 12:00:08 [info] Image processed image=17.jpg total_ms=850.3 ocr_ms=420.1 ...
+Pipeline complete avg_ms_per_image=870
+```
+
+**Target raggiunto**: ~850 ms/immagine con YOLO + OCR + I/O.
+
+### 9i. Monitoraggio VRAM
+
+```bash
+watch -n 2 nvidia-smi
+```
+
+Allocazione tipica con vLLM su RTX 6000 PRO 96 GB:
+
+| Componente | VRAM |
+|-----------|------|
+| Qwen3.6-35B-A3B BF16 | ~35 GB |
+| YOLO OBB TensorRT | ~50 MB |
+| KV cache vLLM | ~50 GB |
+| Safety margin | ~10 GB |
+| **Totale** | **~95 GB** ✅ |
+
+---
+
+## 10. Esecuzione della pipeline
+
+### 10a. Scelta dello script
+
+```bash
+# ── TARGET < 1 s/immagine (RACCOMANDATO) ──
+source .venv/bin/activate
+pip install vllm>=0.19.0
+python3 src/vllm_main.py
+
+# ── llama.cpp (~1.3–2 s/immagine) ──
+source .venv/bin/activate
+python3 src/full-gpu_main.py
+```
+
+### 10b. Avvio in tmux (consigliato)
+
+```bash
+tmux new -s tosano
+source .venv/bin/activate
+python3 src/vllm_main.py   # oppure: python3 src/full-gpu_main.py
+```
+
+**Nota**: `vllm-server` viene avviato automaticamente se non è già in ascolto su port 8001 (vLLM) o 8080 (llama.cpp).
+
+### 10c. Output atteso
+
+```
 output_test/
 ├── crops/
 │   ├── crop_17.jpg          # etichetta croppata
@@ -496,58 +551,22 @@ output_test/
 └── mocr_batch_results.md     # report con summary, timing statistics, dettagli
 ```
 
-Il report `mocr_batch_results.md` include una sezione **Timing Summary** con avg/min/max
-per step (barcode, YOLO, crop, OCR) e tempo totale pipeline.
+Il report `mocr_batch_results.md` include una sezione **Timing Summary** con avg/min/max per step (barcode, YOLO, crop, OCR) e tempo totale pipeline.
 
-### 9d. Staccare e riattaccare tmux
+### 10d. Staccare e riattaccare tmux
 
 ```bash
 # Staccare (Ctrl+B, poi D)
-# Per riattaccare:
 tmux attach -t tosano
-
-# Per killare la sessione:
 tmux kill-session -t tosano
-```
-
-### 9e. Come servizio systemd (opzionale)
-
-Creare `/etc/systemd/system/tosano-label.service`:
-
-```ini
-[Unit]
-Description=Tosano Food Label Processing Pipeline
-After=network.target
-
-[Service]
-Type=simple
-User=<your-user>
-WorkingDirectory=<path-to-project>
-ExecStart=<path-to-project>/.venv/bin/python src/full-gpu_main.py
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:<path-to-project>/output/service.log
-StandardError=append:<path-to-project>/output/service_error.log
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable tosano-label
-sudo systemctl start tosano-label
-sudo systemctl status tosano-label
 ```
 
 ---
 
-## 10. Recupero dei risultati
-
-I risultati vengono salvati in `output_test/`. Per sincronizzarli sulla macchina locale:
+## 11. Recupero dei risultati
 
 ```bash
-# Con rsync (dal laptop locale) — adattare il percorso al proprio setup
+# Con rsync (dal laptop locale)
 rsync -avz --progress \
     user@<cloud-host>:<path-to-project>/output_test/ \
     ./output_cloud/
@@ -558,107 +577,61 @@ rsync -avz user@<cloud-host>:<path-to-project>/output_test/mocr_batch_results.md
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### Errore: `nvcc fatal: Unsupported gpu architecture 'compute_120'`
 
-**Causa**: CUDA Toolkit < 12.8. Il nvcc usato è troppo vecchio.
-**Soluzione**: Installare CUDA 13.0 (cfr. Sezione 3) e verificare che `$CUDA_HOME/bin/nvcc` punti alla versione corretta:
-
-```bash
-/usr/local/cuda-13.0/bin/nvcc --version  # deve mostrare 13.0
-export CUDA_HOME=/usr/local/cuda-13.0
-export PATH=$CUDA_HOME/bin:$PATH
-```
+**Causa**: CUDA Toolkit < 12.8.
+**Soluzione**: Installare CUDA 13.0 (cfr. Sezione 3).
 
 ### Errore: `CUDA error: no kernel image is available for execution`
 
-**Causa**: I kernel CUDA sono compilati per un'architettura GPU diversa (es. sm_89 per RTX 4090).
-**Soluzione**: Ricompilare llama.cpp con `CMAKE_CUDA_ARCHITECTURES=120`:
-
-```bash
-rm -rf build
-cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j$(nproc) --target llama-server
-cp build/bin/llama-server .
-```
+**Causa**: I kernel CUDA sono compilati per un'architettura GPU diversa.
+**Soluzione**: Ricompilare llama.cpp con `CMAKE_CUDA_ARCHITECTURES=120`.
 
 ### Errore: `ImportError: Unable to find zbar shared library`
-
-**Causa**: `libzbar0` non installato.
-**Soluzione**:
 
 ```bash
 sudo apt install libzbar0 libzbar0-dev
 pip uninstall pyzbar -y && pip install pyzbar==0.1.9
 ```
 
-### Errore: `libGL.so.1: cannot open shared object file`
-
-**Causa**: `libgl1` (o `libgl1-mesa-glx` su Ubuntu 22.04) non installato (necessario per OpenCV).
-**Soluzione**:
-
-```bash
-sudo apt install libgl1 libglib2.0-0
-```
-
-### Errore: Port 8080 già occupato (llama-server zombie)
-
-**Causa**: Un processo `llama-server` precedente è rimasto attivo dopo un SSH disconnect.
-**Soluzione**:
+### Errore: Port 8001 (vLLM) o 8080 (llama-server) già occupato
 
 ```bash
 # Trova e kill il processo
-ps aux | grep llama-server | grep -v grep
+ps aux | grep -E "llama-server|vllm" | grep -v grep
 sudo kill -9 <PID>
 
-# Oppure kill tutti i processi llama-server
+# Oppure kill tutti i processi
 pkill -9 -f llama-server
+pkill -9 -f vllm
 ```
 
-### Errore: `hf_hub_download` restituisce 401/403
+### Errore: vLLM out of memory (OOM)
 
-**Causa**: Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è pubblico e non richiede login.
-Un errore 401/403 può indicare rate-limiting o problemi di rete.
-**Soluzione**: Riprovare dopo qualche minuto, oppure autenticarsi con un token HuggingFace:
+**Causa**: Troppi modelli o KV cache in VRAM.
+**Soluzione**: Ridurre `--gpu-memory-utilization`:
+```bash
+# In .env:
+VLLM_GPU_MEMORY_UTILIZATION=0.80
+```
+
+### Errore: vLLM non trova il modello
 
 ```bash
-huggingface-cli login
-python3 src/full-gpu_main.py
-```
-
-### Errore: `Segmentation fault` in llama-server
-
-**Causa**: Spesso driver GPU + CUDA incompatibili, o kernel non compilati per sm_120.
-**Soluzione**: Verificare driver NVIDIA recenti e ricompilare con CUDA 13.0:
-
-```bash
-nvidia-smi | head -5
-# Verifica: driver ≥ 550 per Blackwell
-sudo apt install nvidia-driver-560
-```
-
-### Errore: YOLO OBB non trova etichette
-
-**Causa**: Il modello YOLO funziona meglio con immagini chiare e illuminazione uniforme.
-**Soluzione**: Verificare che le immagini nella cartella `test/` siano leggibili. Se il modello
-TensorRT (`best.engine`) non funziona, usare il PyTorch model direttamente:
-
-```python
-# In src/full-gpu_main.py, usare best.pt al posto di best.engine:
-model = YOLO("best.pt", task="obb")
+# Verifica che il modello sia scaricato
+huggingface-cli download Qwen/Qwen3.6-35B-A3B --local-dir ./model_cache
 ```
 
 ### Verifica finale della pipeline (sanity check)
 
 ```bash
+# Verifica salute vLLM
+curl http://localhost:8001/v1/models
+
 # Verifica salute llama-server
 curl http://localhost:8080/v1/models
-
-# Verifica risposta minima
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen3.6-35B", "messages": [{"role": "user", "content": "Ciao"}], "max_tokens": 10}'
 
 # Verifica GPU visibile a Python
 python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {torch.cuda.get_device_name(0)}')"
@@ -666,7 +639,7 @@ python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {to
 
 ---
 
-## Checklist di deploy rapido
+## Checklist di deploy rapido (vLLM)
 
 ```bash
 # === SUL SERVER CLOUD (RTX 6000 PRO Blackwell, 96 GB) ===
@@ -684,34 +657,33 @@ echo 'export PATH=$CUDA_HOME/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
-# 3. Clone del progetto + llama.cpp
+# 3. Clone del progetto
 git clone https://github.com/<org>/<repo>.git && cd <repo>
-git clone https://github.com/ggml-org/llama.cpp.git
 
 # 4. Python environment
 python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install vllm>=0.19.0
 
-# 5. Build llama.cpp (con supporto Flash Attention e Blackwell sm_120)
-cd llama.cpp && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 \
-    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-    && cmake --build build --config Release -j$(nproc) \
-       --target llama-server llama-cli \
-    && cp build/bin/llama-server . && cd ..
+# 5. Crea .env per vLLM
+cat > .env << 'EOF'
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_PORT=8001
+VLLM_TENSOR_PARALLEL_SIZE=1
+ENABLE_EAN_DETECTION=true
+SAVE_CROPS=false
+YOLO_IMG_SIZE=1024
+CROP_MAX_DIMENSION=1280
+EOF
 
-# 6. Esegui il pipeline full-GPU!
-#    - Download GGUF (~22 GB) avviene automaticamente al primo avvio
-#    - Export TensorRT (~1-2 min) avviene automaticamente al primo avvio
+# 6. Esegui il pipeline vLLM! (target < 1 s/immagine)
 tmux new -s tosano
 source .venv/bin/activate
-python3 src/full-gpu_main.py
-
-# 7. (Opzionale) Test A/B con quantizzazione diversa
-# QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf python3 src/full-gpu_main.py
+python3 src/vllm_main.py
 ```
 
 ---
 
 *Documento generato per il deployment su RTX 6000 PRO Blackwell (sm_120, 96 GB VRAM).*
-*Commit verificato di llama.cpp: `1f30ac0ce` — <https://github.com/ggml-org/llama.cpp/commit/1f30ac0ce>*
+*Modello: `Qwen/Qwen3.6-35B-A3B` — vLLM >= 0.19.0 — HuggingFace model card: huggingface.co/Qwen/Qwen3.6-35B-A3B*
