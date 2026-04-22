@@ -335,7 +335,14 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
                     )
                     return
         except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
-            pass
+            # Show progress every ~10 seconds so the user knows we're still waiting.
+            elapsed_so_far = time.monotonic() - boot_start_time
+            if int(elapsed_so_far) % 10 < LLAMA_SERVER_READY_POLL_SEC + 0.5:
+                logger.info(
+                    "Waiting for llama-server to load model into VRAM...",
+                    elapsed=f"{elapsed_so_far:.0f}s",
+                    timeout=f"{LLAMA_SERVER_BOOT_TIMEOUT_SEC}s",
+                )
 
         # Not ready yet – sleep before polling again.
         time.sleep(LLAMA_SERVER_READY_POLL_SEC)
@@ -1019,15 +1026,19 @@ def main() -> None:
         return
 
     # ----------------------------------------------------------------------------------------------
-    # Load YOLO OBB model (TensorRT FP16 — exports from best.pt on first run)
+    # Step 1/3 — Load YOLO OBB model (TensorRT FP16 — exports from best.pt on first run)
     # ----------------------------------------------------------------------------------------------
+    logger.info("[Step 1/3] Preparing YOLO OBB model (TensorRT FP16)...")
     try:
+        yolo_start = time.perf_counter()
         tensorrt_engine_path: Path = ensure_yolo_tensorrt_engine()
         logger.info(
-            "Loading YOLO OBB (TensorRT FP16)",
+            "[Step 1/3] Loading YOLO OBB engine into GPU",
             model_path=str(tensorrt_engine_path),
         )
         yolo_obb_model: YOLO = YOLO(str(tensorrt_engine_path), task="obb")
+        yolo_elapsed = time.perf_counter() - yolo_start
+        logger.info("[Step 1/3] YOLO OBB ready ✓", elapsed=f"{yolo_elapsed:.1f}s")
     except Exception as exc:
         logger.error(
             "Failed to load YOLO OBB model",
@@ -1036,16 +1047,17 @@ def main() -> None:
         return
 
     # ----------------------------------------------------------------------------------------------
-    # Ensure llama-server is running (auto-download + boot if missing)
+    # Step 2/3 — Ensure llama-server is running (auto-download + boot if missing)
     # ----------------------------------------------------------------------------------------------
+    logger.info("[Step 2/3] Ensuring llama-server is running (download weights + boot)...")
     ensure_llama_server_running(LLAMA_SERVER_BASE_URL)
-    logger.info("llama-server connection configured", url=LLAMA_SERVER_BASE_URL)
+    logger.info("[Step 2/3] llama-server ready ✓", url=LLAMA_SERVER_BASE_URL)
 
     # ----------------------------------------------------------------------------------------------
-    # Process each image (with timing)
+    # Step 3/3 — Process each image (with timing)
     # ----------------------------------------------------------------------------------------------
     logger.info(
-        "Starting batch processing",
+        "[Step 3/3] Starting batch processing",
         total_images=len(input_image_paths),
         report_path=str(batch_report_path),
     )
