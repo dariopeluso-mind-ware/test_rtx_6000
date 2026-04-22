@@ -30,8 +30,6 @@ onnxruntime-gpu==1.23.2       # GPU-enabled (consigliato su cloud)
 # OpenCV (headless, nessuna GUI)
 opencv-python-headless==4.10.0.84
 
-# Utils per pyzbar
-pyzbar-utils==0.1.1
 
 # Array manipulation
 numpy>=1.24.0
