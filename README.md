@@ -315,32 +315,23 @@ ls -lh llama-server
 ## 7. Pre-download dei pesi GGUF
 
 I pesi vengono scaricati automaticamente da `src/full-gpu_main.py` (o `main.py`) alla prima esecuzione tramite `huggingface_hub`.
-Per evitare attese durante il primo run, pre-scaricarli:
+Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è **pubblico** — non serve login né token HuggingFace.
+
+Per evitare attese durante il primo run, pre-scaricarli manualmente:
 
 ```bash
-# Accesso a HuggingFace (richiede account + token se il modello è gated)
-huggingface-cli login
-# Inserire HF_TOKEN (https://huggingface.co/settings/tokens)
-
-# Oppure: esportare il token come variabile d'ambiente
-export HF_TOKEN=hf_your_token_here
-
 # Download del modello principale (UD-Q4_K_XL — raccomandato per full-gpu_main.py)
 huggingface-cli download \
-    --token $HF_TOKEN \
     unsloth/Qwen3.6-35B-A3B-GGUF \
     Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 
 # Download del vision encoder (mmproj)
 huggingface-cli download \
-    --token $HF_TOKEN \
     unsloth/Qwen3.6-35B-A3B-GGUF \
     mmproj-F16.gguf
 ```
 
-**Dimensione stimata**: ~20 GB totali (modello + mmproj).
-
-**Nota**: se il modello è gated (richiede accettazione licenza su HF), accettare prima su <https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF>.
+**Dimensione stimata**: ~22 GB totali (modello + mmproj).
 
 ### Cache location
 
@@ -627,15 +618,12 @@ pkill -9 -f llama-server
 
 ### Errore: `hf_hub_download` restituisce 401/403
 
-**Causa**: Modello gated su HuggingFace (richiede accettazione licenza).
-**Soluzione**:
-
-1. Accedere a <https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF> e accettare la licenza
-2. Generare un HF_TOKEN su <https://huggingface.co/settings/tokens>
-3. Eseguire `huggingface-cli login` sul server, oppure:
+**Causa**: Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è pubblico e non richiede login.
+Un errore 401/403 può indicare rate-limiting o problemi di rete.
+**Soluzione**: Riprovare dopo qualche minuto, oppure autenticarsi con un token HuggingFace:
 
 ```bash
-export HF_TOKEN=hf_your_token_here
+huggingface-cli login
 python3 src/full-gpu_main.py
 ```
 
