@@ -275,7 +275,7 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
         "-c",        str(LLAMA_SERVER_CONTEXT_SIZE),
         "--n-gpu-layers", "99",                    # All layers on GPU
         "-t",        str(LLAMA_SERVER_CPU_THREADS),
-        "--flash-attn",                            # Flash Attention for Blackwell
+        "--flash-attn", "on",                      # Flash Attention for Blackwell (explicit value required by newer llama.cpp)
         "--cont-batching",                         # Continuous batching
         "--cache-prompt",                          # Reuse KV cache for system prompt
         "--chat-template-kwargs",                  # Disable thinking mode (official method)
