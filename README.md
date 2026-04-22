@@ -153,10 +153,23 @@ which nvcc
 
 ## 4. Setup del progetto
 
-Il progetto è trasferito via `git pull`. Struttura dei file:
+Clonare il repository sulla macchina remota:
+
+```bash
+# Scegli la directory di lavoro (es. /workspace su RunPod, ~ su server dedicati)
+cd /workspace   # oppure: cd ~
+
+git clone https://github.com/<org>/<repo>.git
+cd <repo>       # entrare nella cartella del progetto
+```
+
+> In tutto il resto di questa guida, i comandi assumono che la working directory
+> sia la root del progetto (la cartella in cui si trova `requirements.txt`).
+
+Struttura dei file:
 
 ```txt
-1_Riprezzamento-con-foto/
+<repo>/
 ├── best.onnx              # YOLO OBB model (~38 MB)
 ├── best.pt               # YOLO PyTorch model (~21 MB) — usato per export TensorRT
 ├── best.engine            # YOLO TensorRT FP16 (generato al primo avvio di full-gpu_main.py)
@@ -164,7 +177,6 @@ Il progetto è trasferito via `git pull`. Struttura dei file:
 │   ├── main.py            # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
 │   └── full-gpu_main.py   # Script prod (96 GB VRAM, full GPU, TensorRT, thinking OFF)
 ├── test/                  # Immagini di input per batch processing
-├── etichette_esempio/     # Immagini di esempio (~525 MB)
 ├── llama.cpp/             # Repository llama.cpp (source)
 ├── requirements.txt       # Dipendenze Python
 └── output/                # Output processing (generato)
@@ -173,7 +185,7 @@ Il progetto è trasferito via `git pull`. Struttura dei file:
 **Nota**: la directory `llama.cpp/` è un repository standalone
 (`https://github.com/ggml-org/llama.cpp`, commit verificato `1f30ac0ce`).
 
-Se il progetto è già stato clonato via git pull, verificare:
+Verificare che i file essenziali siano presenti:
 
 ```bash
 ls -lh best.onnx best.pt src/main.py requirements.txt
@@ -185,8 +197,7 @@ ls -lh best.onnx best.pt src/main.py requirements.txt
 ## 5. Environment Python
 
 ```bash
-cd ~/1_Riprezzamento-con-foto
-
+# Dalla root del progetto (dove si trova requirements.txt)
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -241,11 +252,12 @@ pip uninstall pyzbar -y && pip install pyzbar==0.1.9
 ### 6a. Configurazione CMake
 
 ```bash
-cd ~/1_Riprezzamento-con-foto/llama.cpp
+# Dalla root del progetto
+cd llama.cpp
 
 # Verifica che CUDA sia nel PATH
 echo $CUDA_HOME
-# Deve mostrare: /usr/local/cuda-13.0
+# Deve mostrare: /usr/local/cuda-13.0 (o /usr/local/cuda-12.8)
 
 cmake -B build \
     -DGGML_CUDA=ON \
@@ -387,6 +399,7 @@ ENABLE_EAN_DETECTION=false python3 src/full-gpu_main.py
 ```
 
 Quando disabilitato:
+
 - Il campo `EAN` nel report sarà sempre `None`
 - La rotazione barcode-based sarà sempre `0°`
 - Lo step "Barcode" nel timing sarà ~0 ms
@@ -422,7 +435,7 @@ watch -n 2 nvidia-smi
 ### 9a. Avvio in tmux (consigliato)
 
 ```bash
-cd ~/1_Riprezzamento-con-foto
+# Dalla root del progetto
 
 # Crea una nuova sessione tmux
 tmux new -s tosano
@@ -503,12 +516,12 @@ After=network.target
 [Service]
 Type=simple
 User=<your-user>
-WorkingDirectory=/home/<your-user>/1_Riprezzamento-con-foto
-ExecStart=/home/<your-user>/1_Riprezzamento-con-foto/.venv/bin/python src/main.py
+WorkingDirectory=<path-to-project>
+ExecStart=<path-to-project>/.venv/bin/python src/full-gpu_main.py
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:/home/<your-user>/1_Riprezzamento-con-foto/output/service.log
-StandardError=append:/home/<your-user>/1_Riprezzamento-con-foto/output/service_error.log
+StandardOutput=append:<path-to-project>/output/service.log
+StandardError=append:<path-to-project>/output/service_error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -525,16 +538,16 @@ sudo systemctl status tosano-label
 
 ## 10. Recupero dei risultati
 
-I risultati vengono salvati in `output/`. Per sincronizzarli sulla macchina locale:
+I risultati vengono salvati in `output_test/`. Per sincronizzarli sulla macchina locale:
 
 ```bash
-# Con rsync (dal laptop locale)
+# Con rsync (dal laptop locale) — adattare il percorso al proprio setup
 rsync -avz --progress \
-    user@<cloud-host>:~/1_Riprezzamento-con-foto/output/ \
+    user@<cloud-host>:<path-to-project>/output_test/ \
     ./output_cloud/
 
 # Solo il report riassuntivo
-rsync -avz user@<cloud-host>:~/1_Riprezzamento-con-foto/output/mocr_batch_results.md ./output_cloud/
+rsync -avz user@<cloud-host>:<path-to-project>/output_test/mocr_batch_results.md ./output_cloud/
 ```
 
 ---
