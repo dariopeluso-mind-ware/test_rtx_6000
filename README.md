@@ -70,7 +70,7 @@ sudo apt update && sudo apt install -y \
     python3-pip \
     python3-dev \
     libzbar0 \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -576,11 +576,11 @@ pip uninstall pyzbar -y && pip install pyzbar==0.1.9
 
 ### Errore: `libGL.so.1: cannot open shared object file`
 
-**Causa**: `libgl1-mesa-glx` non installato (necessario per OpenCV).
+**Causa**: `libgl1` (o `libgl1` su Ubuntu 22.04) non installato (necessario per OpenCV).
 **Soluzione**:
 
 ```bash
-sudo apt install libgl1-mesa-glx libglib2.0-0
+sudo apt install libgl1 libglib2.0-0
 ```
 
 ### Errore: Port 8080 già occupato (llama-server zombie)
@@ -657,7 +657,7 @@ python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {to
 
 # 1. Pacchetti di sistema
 sudo apt update && sudo apt install -y build-essential cmake git curl wget tmux \
-    python3-venv python3-pip libzbar0 libgl1-mesa-glx ca-certificates pkg-config
+    python3-venv python3-pip libzbar0 libgl1 ca-certificates pkg-config
 
 # 2. CUDA Toolkit 13.0 (⚠️ NON 13.2 — causa output gibberish con Qwen3.6!)
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
