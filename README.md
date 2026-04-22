@@ -300,7 +300,7 @@ Tempo stimato: **5–15 minuti** su una macchina cloud con 32+ core.
 ```bash
 cp build/bin/llama-server .
 ls -lh llama-server
-# Verifica: file eseguibile, dimensione plausibile (200–500 MB range linker)
+# Verifica: file eseguibile (~9 MB con linking dinamico)
 ```
 
 ### 6d. Test rapido del binario
@@ -321,12 +321,12 @@ Per evitare attese durante il primo run, pre-scaricarli manualmente:
 
 ```bash
 # Download del modello principale (UD-Q4_K_XL — raccomandato per full-gpu_main.py)
-huggingface-cli download \
+hf download \
     unsloth/Qwen3.6-35B-A3B-GGUF \
     Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 
 # Download del vision encoder (mmproj)
-huggingface-cli download \
+hf download \
     unsloth/Qwen3.6-35B-A3B-GGUF \
     mmproj-F16.gguf
 ```
