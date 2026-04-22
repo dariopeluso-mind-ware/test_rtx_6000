@@ -42,6 +42,12 @@ WARNING: Do NOT use CUDA 13.2 — known bug causes gibberish outputs.
 """
 
 # --------------------------------------------------------------------------------------------------
+# Early startup message — printed before heavy imports so the terminal isn't silent
+# during the ~30-60 s PyTorch + CUDA initialisation phase.
+# --------------------------------------------------------------------------------------------------
+print("\n⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… this takes 30-60 s on first launch.")
+
+# --------------------------------------------------------------------------------------------------
 # Stdlib imports
 # --------------------------------------------------------------------------------------------------
 from pathlib import Path
@@ -60,6 +66,7 @@ import math
 import structlog
 import httpx
 import cv2                                     # OpenCV – used for affine deskew + crop
+import numpy as np                             # NumPy – used for YOLO warmup dummy image
 from PIL import Image as PILImage              # Pillow – used by pyzbar for barcode decoding
 from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
@@ -1052,6 +1059,51 @@ def main() -> None:
     logger.info("[Step 2/3] Ensuring llama-server is running (download weights + boot)...")
     ensure_llama_server_running(LLAMA_SERVER_BASE_URL)
     logger.info("[Step 2/3] llama-server ready ✓", url=LLAMA_SERVER_BASE_URL)
+
+    # ----------------------------------------------------------------------------------------------
+    # Warmup — ensure CUDA kernels are compiled and caches are primed BEFORE timing begins.
+    # Without this, the first image pays a one-time penalty (TensorRT kernel JIT, llama-server
+    # prompt-processing cold-start) that inflates its timing relative to subsequent images.
+    # ----------------------------------------------------------------------------------------------
+    logger.info("[Warmup] Running YOLO + llama-server warmup passes…")
+    warmup_start = time.perf_counter()
+
+    # --- YOLO TensorRT warmup: run a dummy image through the engine so TensorRT compiles
+    #     and caches all CUDA kernels for the current GPU.
+    try:
+        dummy_image: np.ndarray = np.zeros((640, 640, 3), dtype=np.uint8)
+        yolo_obb_model.predict(source=dummy_image, device=0, verbose=False)
+        logger.info("[Warmup] YOLO TensorRT kernels compiled ✓")
+    except Exception as exc:
+        logger.warning(
+            "[Warmup] YOLO warmup failed (non-fatal — first image may be slower)",
+            error=str(exc),
+        )
+
+    # --- llama-server warmup: send a trivial text-only request to force Qwen3.6 to
+    #     allocate its KV cache and run at least one forward pass through all GPU layers.
+    try:
+        warmup_payload: dict = {
+            "model": QWEN_MODEL_API_NAME,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        }
+        warmup_response = httpx.post(
+            f"{LLAMA_SERVER_BASE_URL}/chat/completions",
+            json=warmup_payload,
+            timeout=httpx.Timeout(60.0),
+        )
+        warmup_response.raise_for_status()
+        logger.info("[Warmup] llama-server Qwen3.6 forward pass complete ✓")
+    except Exception as exc:
+        logger.warning(
+            "[Warmup] llama-server warmup failed (non-fatal — first image may be slower)",
+            error=str(exc),
+        )
+
+    warmup_elapsed = time.perf_counter() - warmup_start
+    logger.info("[Warmup] All models warm and ready ✓", elapsed=f"{warmup_elapsed:.1f}s")
 
     # ----------------------------------------------------------------------------------------------
     # Step 3/3 — Process each image (with timing)
