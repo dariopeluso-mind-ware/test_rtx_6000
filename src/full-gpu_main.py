@@ -286,6 +286,7 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
 
     # Write server stdout+stderr to a log file so failures can be diagnosed.
     # The handle is deliberately left open – the subprocess inherits it on fork.
+    LLAMA_SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_file_handle = open(LLAMA_SERVER_LOG_PATH, "w", encoding="utf-8")
     llama_server_subprocess_handle = subprocess.Popen(
         command_line,
