@@ -2,7 +2,7 @@
 
 > Pipeline per l'estrazione automatica di etichette alimentari da fotografie:
 > **YOLO OBB** (crop etichetta) → **Qwen3.6‑35B‑A3B** (OCR vision via llama‑server)
-> → dati strutturati. Tempo totale di processing < 1 s su hardware production (32 GB VRAM).
+> → dati strutturati.
 
 ## Hardware di riferimento
 
@@ -223,7 +223,7 @@ pip install \
     onnxruntime-gpu==1.23.2 \
     opencv-python-headless==4.10.0.84 \
     numpy>=1.24.0 \
-    pyzbar-utils==0.1.1
+    onnx==1.21.0
 ```
 
 **Note importanti**:
@@ -310,7 +310,7 @@ ls -lh llama-server
 
 ## 7. Pre-download dei pesi GGUF
 
-I pesi vengono scaricati automaticamente da `src/main.py` alla prima esecuzione tramite `huggingface_hub`.
+I pesi vengono scaricati automaticamente da `src/full-gpu_main.py` (o `main.py`) alla prima esecuzione tramite `huggingface_hub`.
 Per evitare attese durante il primo run, pre-scaricarli:
 
 ```bash
@@ -321,11 +321,11 @@ huggingface-cli login
 # Oppure: esportare il token come variabile d'ambiente
 export HF_TOKEN=hf_your_token_here
 
-# Download del modello principale (Q4_K_M quantization)
+# Download del modello principale (UD-Q4_K_XL — raccomandato per full-gpu_main.py)
 huggingface-cli download \
     --token $HF_TOKEN \
     unsloth/Qwen3.6-35B-A3B-GGUF \
-    Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+    Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 
 # Download del vision encoder (mmproj)
 huggingface-cli download \
@@ -347,7 +347,7 @@ ls ~/.cache/huggingface/hub/
 # Cerca: models--unsloth--Qwen3.6-35B-A3B-GGUF
 ```
 
-Il path usato da `hf_hub_download` è trasparente, `main.py` lo gestisce automaticamente.
+Il path usato da `hf_hub_download` è trasparente, lo script lo gestisce automaticamente.
 
 ---
 
@@ -589,7 +589,7 @@ pip uninstall pyzbar -y && pip install pyzbar==0.1.9
 
 ### Errore: `libGL.so.1: cannot open shared object file`
 
-**Causa**: `libgl1` (o `libgl1` su Ubuntu 22.04) non installato (necessario per OpenCV).
+**Causa**: `libgl1` (o `libgl1-mesa-glx` su Ubuntu 22.04) non installato (necessario per OpenCV).
 **Soluzione**:
 
 ```bash
@@ -621,7 +621,7 @@ pkill -9 -f llama-server
 
 ```bash
 export HF_TOKEN=hf_your_token_here
-python3 src/main.py
+python3 src/full-gpu_main.py
 ```
 
 ### Errore: `Segmentation fault` in llama-server
@@ -637,12 +637,12 @@ sudo apt install nvidia-driver-560
 
 ### Errore: YOLO OBB non trova etichette
 
-**Causa**: Il modello `best.onnx` funziona meglio con immagini chiare, illuminazione uniforme.
-**Soluzione**: Verificare che le immagini in `etichette_esempio/` siano quelle corrette. Se necessario, usare il modello `.pt` al posto dell'`.onnx`:
+**Causa**: Il modello YOLO funziona meglio con immagini chiare e illuminazione uniforme.
+**Soluzione**: Verificare che le immagini nella cartella `test/` siano leggibili. Se il modello
+TensorRT (`best.engine`) non funziona, usare il PyTorch model direttamente:
 
 ```python
-# In src/main.py, riga 286:
-model = YOLO("best.onnx", task="obb")  # cambiare in:
+# In src/full-gpu_main.py, usare best.pt al posto di best.engine:
 model = YOLO("best.pt", task="obb")
 ```
 
@@ -681,8 +681,8 @@ echo 'export PATH=$CUDA_HOME/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
-# 3. Git pull del progetto
-# git pull (già configurato)
+# 3. Clone del progetto
+git clone https://github.com/<org>/<repo>.git && cd <repo>
 
 # 4. Python environment
 python3 -m venv .venv && source .venv/bin/activate
