@@ -1,0 +1,40 @@
+# Python dependencies for 1_Riprezzamento-con-foto
+# Install with: pip install -r requirements.txt
+#
+# Versioni verificate sul laptop di sviluppo (RTX PRO 1000 Blackwell, 8 GB VRAM).
+# Per il cloud (RTX 6000 PRO Blackwell, 96 GB VRAM) le stesse versioni funzionano.
+
+# YOLO OBB inference
+ultralytics==8.4.37
+
+# HTTP client (async) per chiamate a llama-server
+httpx==0.28.1
+httpx-sse==0.4.3
+
+# Barcode scanning (richiede libzbar0 a livello sistema)
+pyzbar==0.1.9
+
+# Image processing
+pillow==12.2.0
+
+# Structured logging
+structlog==25.5.0
+
+# Download modelli GGUF da HuggingFace
+huggingface_hub==0.36.2
+
+# ONNX runtime (GPU su cloud, CPU solo fallback)
+#onnxruntime==1.23.2          # CPU-only fallback
+onnxruntime-gpu==1.23.2       # GPU-enabled (consigliato su cloud)
+
+# OpenCV (headless, nessuna GUI)
+opencv-python-headless==4.10.0.84
+
+# Utils per pyzbar
+pyzbar-utils==0.1.1
+
+# Array manipulation
+numpy>=1.24.0
+
+# ONNX model support
+onnx==1.21.0

@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+env/
+ENV/
+.eggs/
+*.egg-info/
+dist/
+build/
+*.whl
+
+# PyCharm
+.idea/
+*.iml
+
+# Testing
+.tox/
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# llama.cpp build artifacts
+llama.cpp
+llama.cpp/build/
+llama.cpp/llama-cli
+llama.cpp/llama-server
+llama.cpp/llama-mtmd-cli
+llama.cpp/llama-gguf-split
+llama.cpp/llama-bench
+
+# Downloaded models (GGUF weights are ~20+ GB)
+unsloth/
+models/
+*.gguf
+*.bin
+
+# TensorRT engine (GPU-specific, generated at first run)
+best.engine
+
+# Docker
+.paddlex/
+
+# Output directories
+output/
+output_test/
+
+# Images (large binary files, not tracked in git)
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+
+# Logs
+logs/
+*.log
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (frontend)
+node_modules/
+package-lock.json
+
