@@ -19,7 +19,7 @@ Hardware target:
 
     Per development (8 GB VRAM) usare ``src/main.py`` con --cpu-moe.
 
-Optimizations vs main.py:
+Optimizations vs original:
     - Removed --cpu-moe: all 256 MoE experts run in GPU VRAM
     - Disabled thinking mode: --chat-template-kwargs '{"enable_thinking":false}'
       (official method from https://unsloth.ai/docs/models/qwen3.6)
@@ -27,10 +27,18 @@ Optimizations vs main.py:
     - Continuous batching: --cont-batching
     - Prompt caching: --cache-prompt (reuse system prompt KV cache)
     - YOLO OBB: TensorRT FP16 from custom fine-tuned best.pt (not ONNX CPU)
-    - Sampling: official non-thinking mode parameters from HuggingFace model card
-    - max_tokens: reduced from 8192 to 2048 (food labels never exceed ~1500 tokens)
+    - Sampling: greedy (temperature=0.0, top_k=1) for deterministic OCR
+    - max_tokens: 2048 (food labels never exceed ~1500 tokens)
+    - Single image load: cv2.imread once, reuse numpy array for all stages
+    - In-memory base64: cv2.imencode + base64.b64encode (no disk roundtrip)
+    - SAVE_CROPS toggle: env var to skip disk writes in production hot path
+    - Barcode on downscaled image: pyzbar on 1500px max dimension
+    - Crop resize: 1280px max side before base64 encoding
+    - Persistent httpx.Client: reuse TCP connection across requests
+    - System prompt: KV cache hit for fixed prompt across all images
+    - YOLO imgsz=1024: explicit size matching engine export
+    - llama-server CLI: --batch-size 2048 --ubatch-size 512 -t 8
     - Per-step timing in batch report
-    - EAN detection: optional via ENABLE_EAN_DETECTION env var
 
 References:
     - https://unsloth.ai/docs/models/qwen3.6
@@ -108,25 +116,49 @@ QWEN_MODEL_API_NAME: str = "Qwen3.6"          # Value used in the chat-completio
 LLAMA_SERVER_PORT: int = 8080
 LLAMA_SERVER_BASE_URL: str = f"http://localhost:{LLAMA_SERVER_PORT}/v1"
 LLAMA_SERVER_CONTEXT_SIZE: int = 16384         # As recommended by Unsloth llama-server tutorial
-LLAMA_SERVER_CPU_THREADS: int = 4              # With full GPU offload, fewer CPU threads needed
+LLAMA_SERVER_CPU_THREADS: int = 8             # With full GPU offload, 8 threads for tokenizer/sampling
 LLAMA_SERVER_SHUTDOWN_TIMEOUT_SEC: float = 10.0
 LLAMA_SERVER_READY_POLL_SEC: float = 5.0       # Sleep between readiness probes during boot
 LLAMA_SERVER_BOOT_TIMEOUT_SEC: float = 600.0   # 10 min: includes first-time GGUF download (~22 GB)
+LLAMA_SERVER_BATCH_SIZE: int = 2048            # Batch size for prefill acceleration
+LLAMA_SERVER_UBATCH_SIZE: int = 512            # Micro-batch size
 
 # --- Transcription API settings ---
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
 TRANSCRIPTION_MAX_RETRIES: int = 3
 TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 2048    # Food labels never exceed ~1500 tokens
-TRANSCRIPTION_PROMPT: str = (
-    "Read all the text in this image. Output only the text directly. "
-    "Do not explain or add comments."
+
+# System prompt (cached in KV cache, reused for all images)
+TRANSCRIPTION_SYSTEM_PROMPT: str = (
+    "You are a precise OCR system. Read all the text in the image. "
+    "Output only the text directly. Do not explain or add comments."
 )
+
+# User prompt (image-specific, cannot be cached)
+TRANSCRIPTION_USER_PROMPT: str = "Transcribe the text in this image."
 
 # --- EAN detection toggle ---
 # Set ENABLE_EAN_DETECTION=false to skip barcode search (saves ~5-10 ms per image)
 ENABLE_EAN_DETECTION: bool = os.environ.get(
     "ENABLE_EAN_DETECTION", "true"
 ).lower() == "true"
+
+# --- Crop disk-write toggle ---
+# Set SAVE_CROPS=true to write cropped label JPEGs to disk (for debugging).
+# Default false: skip disk I/O in production hot path, only base64 encode in memory.
+SAVE_CROPS: bool = os.environ.get("SAVE_CROPS", "false").lower() == "true"
+
+# --- Image preprocessing settings ---
+# Downscale barcode images to this max dimension before pyzbar scan.
+# EAN barcodes are large enough (100+ px wide) to survive downscale with full recall.
+PYZBAR_MAX_DIMENSION: int = 1500
+
+# Resize crop to this max dimension before base64 encoding.
+# Smaller images = less base64 data = faster prefill in llama-server.
+CROP_MAX_DIMENSION: int = 1280
+
+# JPEG quality for in-memory encoding (0-100, higher = larger file + more quality)
+CROP_JPEG_QUALITY: int = 90
 
 # --- Barcode decoding settings ---
 # Barcode types that encode a standard retail EAN/UPC product code.
@@ -149,6 +181,7 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # --- YOLO model paths ---
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
+YOLO_IMG_SIZE: int = 1024                    # Must match TensorRT engine export size
 
 # --------------------------------------------------------------------------------------------------
 # Global state – shared across function calls without passing as arguments.
@@ -159,10 +192,34 @@ YOLO_TENSORRT_PATH: Path = Path("best.engine")
 # None when no subprocess was spawned (server was already running or not needed).
 llama_server_subprocess_handle: subprocess.Popen | None = None
 
+# Persistent HTTP client for llama-server (reused across all transcription requests).
+# Created lazily in _get_http_client() after server is confirmed ready.
+_http_client: httpx.Client | None = None
+
 # --------------------------------------------------------------------------------------------------
 # Module logger (structured via structlog)
 # --------------------------------------------------------------------------------------------------
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+
+# ==================================================================================================
+# HTTP Client Management
+# ==================================================================================================
+
+def _get_http_client() -> httpx.Client:
+    """
+    Returns a persistent httpx.Client connected to llama-server.
+
+    The client is created once and reused for all transcription requests,
+    avoiding TCP connection overhead on each call.
+    """
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.Client(
+            timeout=httpx.Timeout(TRANSCRIPTION_HTTP_TIMEOUT_SEC),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        )
+    return _http_client
 
 
 # ==================================================================================================
@@ -177,7 +234,13 @@ def shutdown_llama_server_on_exit() -> None:
     terminates unexpectedly. First attempts a clean shutdown with a 10 s timeout; falls
     back to SIGKILL if the process does not exit voluntarily.
     """
-    global llama_server_subprocess_handle
+    global llama_server_subprocess_handle, _http_client
+
+    # Close persistent HTTP client first.
+    if _http_client is not None:
+        _http_client.close()
+        _http_client = None
+
     if llama_server_subprocess_handle is None:
         return
 
@@ -207,6 +270,7 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
           (official method from Unsloth docs)
         - Continuous batching enabled
         - Prompt caching enabled
+        - Batch size for prefill acceleration
 
     Args:
         llama_server_base_url: Base URL of the llama-server OpenAI-compatible API
@@ -288,6 +352,8 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
         "--flash-attn", "on",                      # Flash Attention for Blackwell (explicit value required by newer llama.cpp)
         "--cont-batching",                         # Continuous batching
         "--cache-prompt",                          # Reuse KV cache for system prompt
+        "--batch-size", str(LLAMA_SERVER_BATCH_SIZE),   # Prefill batch size
+        "--ubatch-size", str(LLAMA_SERVER_UBATCH_SIZE), # Micro-batch size
         "--chat-template-kwargs",                  # Disable thinking mode (official method)
         '{"enable_thinking":false}',               # from Unsloth docs + HuggingFace model card
     ]
@@ -347,7 +413,7 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
         except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
             # Show progress every ~10 seconds so the user knows we're still waiting.
             elapsed_so_far = time.monotonic() - boot_start_time
-            if int(elapsed_so_far) % 10 < LLAMA_SERVER_READY_POLL_SEC + 0.5:
+            if int(elapsed_so_far) % 10 < int(LLAMA_SERVER_READY_POLL_SEC) + 1:
                 logger.info(
                     "Waiting for llama-server to load model into VRAM...",
                     elapsed=f"{elapsed_so_far:.0f}s",
@@ -399,14 +465,41 @@ def ensure_yolo_tensorrt_engine() -> Path:
 
 
 # ==================================================================================================
-# Barcode Detection
+# Image Preprocessing Utilities
+# ==================================================================================================
+
+def _resize_image_max_dimension(image: cv2.Mat, max_dim: int) -> cv2.Mat:
+    """
+    Resizes an image so its longest side equals max_dim, preserving aspect ratio.
+
+    Args:
+        image: Source image as OpenCV BGR Mat.
+        max_dim: Target maximum dimension (width or height).
+
+    Returns:
+        Resized image.
+    """
+    h, w = image.shape[:2]
+    if max(h, w) <= max_dim:
+        return image
+    scale = max_dim / max(h, w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+# ==================================================================================================
+# Barcode Detection (optimized: downscaled input)
 # ==================================================================================================
 
 def detect_ean_barcode_and_orientation(
-    image_path: Path,
+    image_bgr: cv2.Mat,
 ) -> tuple[str | None, int]:
     """
     Scans a single image for retail EAN/UPC barcodes using pyzbar.
+
+    The input image is downscaled to PYZBAR_MAX_DIMENSION pixels before scanning
+    to reduce computation while preserving full barcode detection accuracy.
 
     pyzbar returns one or more decoded barcode symbols, each tagged with a cryptic
     "orientation" string that indicates how the barcode is rotated relative to the
@@ -415,7 +508,8 @@ def detect_ean_barcode_and_orientation(
     in degrees (0, 90, 180, or 270).
 
     Args:
-        image_path: Absolute or relative path to the input image file.
+        image_bgr: Input image as OpenCV BGR Mat (pre-loaded by caller to avoid
+                   redundant disk I/O).
 
     Returns:
         A 2-tuple ``(ean_code, rotation_degrees)``:
@@ -428,12 +522,17 @@ def detect_ean_barcode_and_orientation(
         No explicit exceptions – errors are logged and cause the function to return
         ``(None, 0)`` so processing can continue even when barcode detection fails.
     """
+    # Downscale for faster pyzbar scan (barcode metrics are preserved at this size).
+    image_for_scan = _resize_image_max_dimension(image_bgr, PYZBAR_MAX_DIMENSION)
+
     try:
-        pil_image: PILImage.Image = PILImage.open(image_path)
+        # pyzbar requires RGB PIL image.
+        pil_image: PILImage.Image = PILImage.fromarray(
+            cv2.cvtColor(image_for_scan, cv2.COLOR_BGR2RGB)
+        )
     except Exception as exc:
         logger.error(
-            "Failed to open image for barcode decoding",
-            file=str(image_path),
+            "Failed to convert image for barcode decoding",
             error=str(exc),
         )
         return None, 0
@@ -442,8 +541,7 @@ def detect_ean_barcode_and_orientation(
         decoded_symbols = decode_barcodes(pil_image)
     except Exception as exc:
         logger.error(
-            "Failed to decode barcodes in image",
-            file=str(image_path),
+            "Failed to decode barcodes",
             error=str(exc),
         )
         return None, 0
@@ -479,7 +577,7 @@ def detect_ean_barcode_and_orientation(
 # ==================================================================================================
 
 def _deskew_crop_obb(
-    source_image_path: Path,
+    source_image_bgr: cv2.Mat,
     obb_center_x: float,
     obb_center_y: float,
     obb_width: float,
@@ -496,30 +594,23 @@ def _deskew_crop_obb(
     the box centre by the negative of ``obb_rotation_radians`` so that the OBB becomes
     axis-aligned; a plain NumPy slice then yields the correctly oriented crop.
 
-    After the deskew crop, an additional "fine" rotation from pyzbar's barcode
-    orientation is applied when the label itself is physically upside-down or
-    sideways relative to the reading direction.
-
     Args:
-        source_image_path: Path to the source image on disk.
+        source_image_bgr: Source image as OpenCV BGR Mat (pre-loaded by caller).
         obb_center_x: OBB centroid x-coordinate (pixel units).
         obb_center_y: OBB centroid y-coordinate (pixel units).
         obb_width: OBB width along its local x-axis (pixel units).
         obb_height: OBB height along its local y-axis (pixel units).
         obb_rotation_radians: OBB rotation angle in radians (positive = CCW).
         additional_rotation_degrees: Fine-adjustment rotation from barcode orientation
-                                     (0 / 90 / 180 / 270 degrees).
+                                     (0 / 90 / 180 / 270 degrees). Currently unused
+                                     (kept for future extension).
 
     Returns:
         The cropped label as an OpenCV BGR image (height × width × 3).
 
     Raises:
-        cv2.error: If the image cannot be read or the rotation/crop parameters are invalid.
+        cv2.error: If the rotation/crop parameters are invalid.
     """
-    source_image_bgr: cv2.Mat = cv2.imread(str(source_image_path))
-    if source_image_bgr is None:
-        raise cv2.error(f"cv2.imread returned None for: {source_image_path}")
-
     image_height, image_width = source_image_bgr.shape[:2]
     bbox_rotation_degrees: float = math.degrees(obb_rotation_radians)
 
@@ -555,39 +646,30 @@ def _deskew_crop_obb(
     y2_clipped = min(image_height, y2)
 
     cropped_label_bgr: cv2.Mat = deskewed_image_bgr[y1_clipped:y2_clipped, x1_clipped:x2_clipped]
-    
-    '''
-    # Apply the additional fine-rotation derived from the barcode's physical orientation.
-    # This handles the case where the label was photographed physically rotated (e.g. printed
-    # upside-down on the package) even after the OBB deskew has corrected the camera tilt.
-    if additional_rotation_degrees == 90:
-        cropped_label_bgr = cv2.rotate(cropped_label_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    elif additional_rotation_degrees == 180:
-        cropped_label_bgr = cv2.rotate(cropped_label_bgr, cv2.ROTATE_180)
-    elif additional_rotation_degrees == 270:
-        cropped_label_bgr = cv2.rotate(cropped_label_bgr, cv2.ROTATE_90_CLOCKWISE)
-    '''
 
     return cropped_label_bgr
 
 
 # ==================================================================================================
-# OCR Transcription via llama-server
+# OCR Transcription via llama-server (optimized: greedy + system prompt + in-memory base64)
 # ==================================================================================================
 
 def _transcribe_label_image(
-    cropped_label_path: Path,
+    cropped_label_bgr: cv2.Mat,
     llama_server_base_url: str,
 ) -> str:
     """
     Sends a cropped label image to llama-server (Qwen3.6 vision model) for OCR.
 
-    Uses the official non-thinking mode sampling parameters from the HuggingFace
-    model card (Instruct mode for general tasks):
-        temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5
+    Optimizations:
+    - In-memory base64 encoding (no disk roundtrip)
+    - Crop resized to CROP_MAX_DIMENSION before encoding (smaller = faster prefill)
+    - System prompt for KV cache hit (fixed prompt reused for all images)
+    - Greedy sampling (temperature=0.0, top_k=1) for deterministic OCR output
+    - Persistent httpx.Client for connection reuse
 
     Args:
-        cropped_label_path: Path to the cropped label JPEG on disk.
+        cropped_label_bgr: Cropped label as OpenCV BGR Mat (pre-cropped by caller).
         llama_server_base_url: Base URL of the llama-server OpenAI-compatible API.
 
     Returns:
@@ -596,20 +678,28 @@ def _transcribe_label_image(
     Raises:
         RuntimeError: If all retry attempts fail.
     """
-    with open(cropped_label_path, "rb") as image_file_handle:
-        base64_encoded_crop: str = base64.b64encode(image_file_handle.read()).decode("utf-8")
+    # Resize crop to max dimension (reduces base64 payload size and prefill time).
+    resized_crop = _resize_image_max_dimension(cropped_label_bgr, CROP_MAX_DIMENSION)
+
+    # In-memory JPEG encoding → base64 (no disk I/O).
+    ok, buf = cv2.imencode('.jpg', resized_crop, [cv2.IMWRITE_JPEG_QUALITY, CROP_JPEG_QUALITY])
+    if not ok:
+        raise RuntimeError("cv2.imencode failed for cropped label")
+    base64_encoded_crop: str = base64.b64encode(buf).decode("utf-8")
 
     # Build the OpenAI-compatible chat-completion payload.
-    # Sampling parameters from official HuggingFace model card:
-    # "Instruct (non-thinking) mode for general tasks:
-    #  temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5"
+    # System prompt is cached in KV; user prompt is minimal.
     chat_completion_payload: dict = {
         "model": QWEN_MODEL_API_NAME,
         "messages": [
             {
+                "role": "system",
+                "content": TRANSCRIPTION_SYSTEM_PROMPT,
+            },
+            {
                 "role": "user",
                 "content": [
-                    {"type": "text",      "text": TRANSCRIPTION_PROMPT},
+                    {"type": "text",      "text": TRANSCRIPTION_USER_PROMPT},
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{base64_encoded_crop}"},
@@ -617,10 +707,10 @@ def _transcribe_label_image(
                 ],
             }
         ],
-        "temperature": 0.7,                        # Official non-thinking mode param
+        "temperature": 0.0,                       # Greedy: deterministic, fastest
         "max_tokens": TRANSCRIPTION_MAX_OUTPUT_TOKENS,
-        "top_p": 0.8,                              # Official non-thinking mode param
-        "presence_penalty": 1.5,                   # Official non-thinking mode param
+        "top_k": 1,                               # Greedy: no sampling overhead
+        "stop": ["<|im_end|>"],                   # Explicit stop token
     }
 
     chat_url: str = f"{llama_server_base_url}/chat/completions"
@@ -628,13 +718,10 @@ def _transcribe_label_image(
 
     for attempt in range(1, TRANSCRIPTION_MAX_RETRIES + 1):
         try:
-            models_endpoint_response = httpx.post(
-                chat_url,
-                json=chat_completion_payload,
-                timeout=httpx.Timeout(TRANSCRIPTION_HTTP_TIMEOUT_SEC),
-            )
-            models_endpoint_response.raise_for_status()
-            chat_completion_response_json: dict = models_endpoint_response.json()
+            client = _get_http_client()
+            response = client.post(chat_url, json=chat_completion_payload)
+            response.raise_for_status()
+            chat_completion_response_json: dict = response.json()
 
             transcribed_text: str = str(
                 chat_completion_response_json["choices"][0]["message"]["content"]
@@ -645,7 +732,6 @@ def _transcribe_label_image(
             last_error = exc
             logger.warning(
                 "Transcription API call failed – retrying",
-                image=cropped_label_path.name,
                 attempt=attempt,
                 max_retries=TRANSCRIPTION_MAX_RETRIES,
                 error=str(exc),
@@ -661,7 +747,7 @@ def _transcribe_label_image(
 
 
 # ==================================================================================================
-# Per-Image Pipeline (with per-step timing)
+# Per-Image Pipeline (with per-step timing, optimized I/O)
 # ==================================================================================================
 
 def process_single_label_image(
@@ -674,18 +760,27 @@ def process_single_label_image(
     Executes the full label-extraction pipeline for a single input image,
     measuring elapsed time for each step.
 
+    Optimizations vs original:
+    - Single image load: cv2.imread once, reuse numpy array for all stages
+    - In-memory base64: cv2.imencode + base64.b64encode (no disk roundtrip for crop)
+    - Optional disk write of crop only if SAVE_CROPS=true
+    - Barcode on downscaled image (PYZBAR_MAX_DIMENSION px)
+    - YOLO with explicit imgsz=YOLO_IMG_SIZE matching engine export
+
     Stages (in order):
-        1. Barcode detection (EAN code + orientation) — optional via ENABLE_EAN_DETECTION.
-        2. YOLO OBB label detection (TensorRT FP16 GPU).
-        3. Affine deskew + axis-aligned crop.
-        4. OCR transcription via llama-server (Qwen3.6 vision model, non-thinking mode).
-        5. Save cropped label JPEG to disk.
+        1. Image load (once) — cv2.imread
+        2. Barcode detection (EAN code + orientation) — optional via ENABLE_EAN_DETECTION
+        3. YOLO OBB label detection (TensorRT FP16 GPU)
+        4. Affine deskew + axis-aligned crop
+        5. OCR transcription via llama-server (Qwen3.6 vision model, greedy sampling)
+        6. Optional: save cropped label JPEG to disk (only if SAVE_CROPS=true)
 
     Args:
         input_image_path: Path to the input photograph.
         yolo_obb_model: Pre-loaded YOLO OBB model (TensorRT engine).
         llama_server_base_url: Base URL of the llama-server OpenAI-compatible API.
-        cropped_labels_output_dir: Directory where cropped label JPEGs are written.
+        cropped_labels_output_dir: Directory where cropped label JPEGs are written
+                                   (only used if SAVE_CROPS=true).
 
     Returns:
         A dict with keys: name, ean, rotation, text, timing.
@@ -694,13 +789,22 @@ def process_single_label_image(
     t_image_start: float = time.perf_counter()
 
     # ----------------------------------------------------------------------------------------------
-    # Stage 1 – Barcode detection (optional)
+    # Stage 0 – Load image ONCE (shared across all stages)
+    # ----------------------------------------------------------------------------------------------
+    t_load_start: float = time.perf_counter()
+    source_image_bgr: cv2.Mat = cv2.imread(str(input_image_path))
+    if source_image_bgr is None:
+        raise cv2.error(f"cv2.imread returned None for: {input_image_path}")
+    t_load_ms: float = (time.perf_counter() - t_load_start) * 1000
+
+    # ----------------------------------------------------------------------------------------------
+    # Stage 1 – Barcode detection (optional, on downscaled image)
     # ----------------------------------------------------------------------------------------------
     t_barcode_start: float = time.perf_counter()
 
     if ENABLE_EAN_DETECTION:
         ean_code, additional_rotation_degrees = detect_ean_barcode_and_orientation(
-            input_image_path
+            source_image_bgr
         )
     else:
         ean_code = None
@@ -709,13 +813,16 @@ def process_single_label_image(
     t_barcode_ms: float = (time.perf_counter() - t_barcode_start) * 1000
 
     # ----------------------------------------------------------------------------------------------
-    # Stage 2 – YOLO OBB label detection (TensorRT GPU)
+    # Stage 2 – YOLO OBB label detection (TensorRT GPU, numpy array input)
     # ----------------------------------------------------------------------------------------------
     t_yolo_start: float = time.perf_counter()
 
     try:
+        # Pass numpy array directly (avoids redundant disk read inside predict).
+        # imgsz=YOLO_IMG_SIZE must match the TensorRT engine export size.
         yolo_results = yolo_obb_model.predict(
-            source=str(input_image_path),
+            source=source_image_bgr,
+            imgsz=YOLO_IMG_SIZE,
             device=0,         # GPU inference via TensorRT
             verbose=False,
         )
@@ -733,6 +840,7 @@ def process_single_label_image(
             "rotation": additional_rotation_degrees,
             "text": f"YOLO inference error: {exc}",
             "timing": {
+                "load_ms": round(t_load_ms, 1),
                 "barcode_ms": round(t_barcode_ms, 1),
                 "yolo_ms": round(t_yolo_ms, 1),
                 "crop_ms": 0.0,
@@ -751,6 +859,7 @@ def process_single_label_image(
             "rotation": additional_rotation_degrees,
             "text": "No label detected by YOLO OBB.",
             "timing": {
+                "load_ms": round(t_load_ms, 1),
                 "barcode_ms": round(t_barcode_ms, 1),
                 "yolo_ms": round(t_yolo_ms, 1),
                 "crop_ms": 0.0,
@@ -760,7 +869,7 @@ def process_single_label_image(
         }
 
     # ----------------------------------------------------------------------------------------------
-    # Stage 3 – Deskew + crop
+    # Stage 3 – Deskew + crop (reuses source_image_bgr from Stage 0)
     # ----------------------------------------------------------------------------------------------
     t_crop_start: float = time.perf_counter()
 
@@ -776,7 +885,7 @@ def process_single_label_image(
 
     try:
         cropped_label_bgr: cv2.Mat = _deskew_crop_obb(
-            source_image_path=input_image_path,
+            source_image_bgr=source_image_bgr,
             obb_center_x=bbox_center_x,
             obb_center_y=bbox_center_y,
             obb_width=bbox_width,
@@ -797,6 +906,7 @@ def process_single_label_image(
             "rotation": additional_rotation_degrees,
             "text": f"Image crop failed: {exc}",
             "timing": {
+                "load_ms": round(t_load_ms, 1),
                 "barcode_ms": round(t_barcode_ms, 1),
                 "yolo_ms": round(t_yolo_ms, 1),
                 "crop_ms": round(t_crop_ms, 1),
@@ -805,25 +915,27 @@ def process_single_label_image(
             },
         }
 
-    # Write the cropped label to disk so it can be inspected / used as a reference.
-    cropped_label_output_path: Path = cropped_labels_output_dir / f"crop_{input_image_path.name}"
-    write_success: bool = cv2.imwrite(str(cropped_label_output_path), cropped_label_bgr)
-    if not write_success:
-        logger.warning(
-            "cv2.imwrite returned False – file may be corrupted",
-            crop_path=str(cropped_label_output_path),
-        )
+    # Write the cropped label to disk ONLY if SAVE_CROPS=true (debug mode).
+    # In production, we skip disk I/O and encode in memory for base64.
+    if SAVE_CROPS:
+        cropped_label_output_path: Path = cropped_labels_output_dir / f"crop_{input_image_path.name}"
+        write_success: bool = cv2.imwrite(str(cropped_label_output_path), cropped_label_bgr)
+        if not write_success:
+            logger.warning(
+                "cv2.imwrite returned False – file may be corrupted",
+                crop_path=str(cropped_label_output_path),
+            )
 
     t_crop_ms: float = (time.perf_counter() - t_crop_start) * 1000
 
     # ----------------------------------------------------------------------------------------------
-    # Stage 4 – OCR transcription
+    # Stage 4 – OCR transcription (in-memory, no disk roundtrip)
     # ----------------------------------------------------------------------------------------------
     t_ocr_start: float = time.perf_counter()
 
     try:
         transcription_markdown: str = _transcribe_label_image(
-            cropped_label_output_path, llama_server_base_url
+            cropped_label_bgr, llama_server_base_url
         )
         logger.info(
             "Label transcribed successfully",
@@ -842,6 +954,7 @@ def process_single_label_image(
             "rotation": additional_rotation_degrees,
             "text": f"API Error: {exc}",
             "timing": {
+                "load_ms": round(t_load_ms, 1),
                 "barcode_ms": round(t_barcode_ms, 1),
                 "yolo_ms": round(t_yolo_ms, 1),
                 "crop_ms": round(t_crop_ms, 1),
@@ -859,6 +972,7 @@ def process_single_label_image(
         "rotation": additional_rotation_degrees,
         "text": transcription_markdown,
         "timing": {
+            "load_ms": round(t_load_ms, 1),
             "barcode_ms": round(t_barcode_ms, 1),
             "yolo_ms": round(t_yolo_ms, 1),
             "crop_ms": round(t_crop_ms, 1),
@@ -896,7 +1010,10 @@ def write_batch_report(
             f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
             f.write(f"**GGUF Model:** `{QWEN_GGUF_WEIGHTS_FILENAME}`  \n")
             f.write(f"**EAN Detection:** {'enabled' if ENABLE_EAN_DETECTION else 'disabled'}  \n")
-            f.write(f"**Thinking Mode:** disabled (non-thinking instruct mode)  \n\n")
+            f.write(f"**SAVE_CROPS:** {'true' if SAVE_CROPS else 'false'}  \n")
+            f.write(f"**Sampling:** greedy (temperature=0.0, top_k=1)  \n")
+            f.write(f"**Crop max dimension:** {CROP_MAX_DIMENSION}px  \n")
+            f.write(f"**YOLO imgsz:** {YOLO_IMG_SIZE}px  \n\n")
 
             # ---- Summary table ------------------------------------------------------------------
             f.write("## Summary\n\n")
@@ -935,8 +1052,8 @@ def write_batch_report(
             f.write("## Timing Summary\n\n")
 
             # Collect timing arrays (only successful results)
-            timing_keys = ["barcode_ms", "yolo_ms", "crop_ms", "ocr_ms", "total_ms"]
-            timing_labels = ["Barcode", "YOLO OBB", "Crop", "OCR", "**Total**"]
+            timing_keys = ["load_ms", "barcode_ms", "yolo_ms", "crop_ms", "ocr_ms", "total_ms"]
+            timing_labels = ["Load", "Barcode", "YOLO OBB", "Crop", "OCR", "**Total**"]
             timing_data: dict[str, list[float]] = {k: [] for k in timing_keys}
 
             for result in batch_processing_results:
@@ -968,7 +1085,7 @@ def write_batch_report(
                 f.write(f"- **EAN:** {result['ean'] or 'None'}\n")
                 f.write(f"- **Rotation Needed:** {result['rotation']}°\n")
                 f.write(
-                    f"- **Timing:** barcode={t['barcode_ms']}ms, "
+                    f"- **Timing:** load={t['load_ms']}ms, barcode={t['barcode_ms']}ms, "
                     f"yolo={t['yolo_ms']}ms, crop={t['crop_ms']}ms, "
                     f"ocr={t['ocr_ms']}ms, **total={t['total_ms']}ms**\n"
                 )
@@ -998,7 +1115,7 @@ def main() -> None:
         2. Export/load the YOLO OBB model as TensorRT FP16 engine.
         3. Ensure llama-server is running (downloading Qwen3.6 weights if necessary).
         4. Process each image through the full pipeline (with per-step timing).
-        5. Save per-image cropped labels and transcripts.
+        5. Save per-image transcripts (crops only if SAVE_CROPS=true).
         6. Write a summary markdown report with timing statistics.
     """
     import_elapsed_sec: float = time.perf_counter() - _IMPORT_START_MONOTONIC
@@ -1006,6 +1123,7 @@ def main() -> None:
         "Starting full-GPU pipeline",
         gguf_model=QWEN_GGUF_WEIGHTS_FILENAME,
         ean_detection=ENABLE_EAN_DETECTION,
+        save_crops=SAVE_CROPS,
         import_time=f"{import_elapsed_sec:.1f}s",
     )
 
@@ -1066,22 +1184,19 @@ def main() -> None:
     logger.info("[Step 2/3] llama-server ready ✓", url=LLAMA_SERVER_BASE_URL)
 
     # ----------------------------------------------------------------------------------------------
-    # Warmup — YOLO TensorRT kernel compilation.
+    # Warmup — YOLO TensorRT kernel compilation with a representative image size.
     #
     # TensorRT JIT-compiles CUDA kernels on the first inference for the current GPU architecture.
-    # Without this warmup, image #1's yolo_ms would be inflated by the one-time compilation cost.
-    #
-    # NOTE: llama-server does NOT need manual warmup — it performs an automatic empty-inference
-    # warmup pass during boot (before /models returns 200).  Since ensure_llama_server_running()
-    # polls /models, Qwen3.6 is already fully warmed up by the time we reach this point.
-    # To disable the built-in warmup one would pass --no-warmup (we don't).
+    # We use a realistic image size (1024×1024) to avoid recompilation on first real image.
+    # NOTE: llama-server performs an automatic warmup pass during boot — no extra action needed.
     # ----------------------------------------------------------------------------------------------
-    logger.info("[Warmup] Running YOLO TensorRT warmup pass…")
+    logger.info("[Warmup] Running YOLO TensorRT warmup pass (1024×1024)…")
     warmup_start = time.perf_counter()
 
     try:
-        dummy_image: np.ndarray = np.zeros((640, 640, 3), dtype=np.uint8)
-        yolo_obb_model.predict(source=dummy_image, device=0, verbose=False)
+        # Use a realistic warmup size matching YOLO_IMG_SIZE.
+        dummy_image: np.ndarray = np.zeros((YOLO_IMG_SIZE, YOLO_IMG_SIZE, 3), dtype=np.uint8)
+        yolo_obb_model.predict(source=dummy_image, imgsz=YOLO_IMG_SIZE, device=0, verbose=False)
         logger.info("[Warmup] YOLO TensorRT kernels compiled ✓")
     except Exception as exc:
         logger.warning(
@@ -1124,10 +1239,13 @@ def main() -> None:
             total_ms=t["total_ms"],
             ocr_ms=t["ocr_ms"],
             yolo_ms=t["yolo_ms"],
+            load_ms=t["load_ms"],
+            barcode_ms=t["barcode_ms"],
+            crop_ms=t["crop_ms"],
         )
 
         # --------------------------------------------------------------------------------------------
-        # Write per-image transcript immediately (checkpointing so partial results survive crashes)
+        # Write per-image transcript (checkpointing so partial results survive crashes)
         # --------------------------------------------------------------------------------------------
         individual_transcript_path: Path = (
             cropped_labels_dir / f"transcript_{input_image_path.stem}.md"
@@ -1143,7 +1261,7 @@ def main() -> None:
                 )
                 transcript_file_handle.write(
                     f"- **Timing:** {t['total_ms']}ms "
-                    f"(barcode={t['barcode_ms']}ms, yolo={t['yolo_ms']}ms, "
+                    f"(load={t['load_ms']}ms, barcode={t['barcode_ms']}ms, yolo={t['yolo_ms']}ms, "
                     f"crop={t['crop_ms']}ms, ocr={t['ocr_ms']}ms)\n\n"
                 )
                 transcript_file_handle.write(f"```markdown\n{result['text']}\n```\n")
