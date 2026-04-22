@@ -39,7 +39,7 @@ Questo documento descrive come replicare l'ambiente sulla macchina cloud RTX 600
 7. [Pre-download dei pesi GGUF](#7-pre-download-dei-pesi-gguf)
 8. [Esecuzione Full-GPU llama.cpp (96 GB VRAM)](#8-esecuzione-full-gpu-llamacpp-96-gb-vram)
 9. **[Esecuzione vLLM](#9-esecuzione-vllm)**
-10. [Esecuzione della pipeline](#10-esecuzione-della-pipeline)
+10. [Output e risultati](#10-output-e-risultati)
 11. [Recupero dei risultati](#11-recupero-dei-risultati)
 12. [Troubleshooting](#12-troubleshooting)
 
@@ -345,7 +345,21 @@ V2 risolve il **bug di ripetizione infinita** osservato nell'analisi batch (imag
 | Async image prefetch | Elimina cold-cache I/O RunPod (load 5s → ~0ms) |
 | Downscale pre-warpAffine | Crop time ~50ms → ~15ms |
 
-### 8c. Configurazione (`.env`)
+### 8c. Parametri di sampling (raccomandazioni ufficiali Qwen3.6)
+
+I parametri utilizzati in `full-gpu_main_v2.py` seguono le
+[raccomandazioni ufficiali del model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8#best-practices).
+
+| Parametro | Valore | Motivazione |
+| ----------- | -------- | ------------- |
+| `presence_penalty` | `1.5` | Anti-ripetizione (range ufficiale: 0–2) |
+| `temperature` | `0.0` | Greedy per OCR deterministico (in llama.cpp via `top_k=1`) |
+| Thinking mode | Disabilitato | Via `--chat-template-kwargs '{"enable_thinking":false}'` |
+
+> **Nota**: Qwen3.6 **non supporta** `/think` e `/nothink`. Il thinking mode si
+> disabilita esclusivamente via `chat-template-kwargs`.
+
+### 8d. Configurazione (`.env`)
 
 ```bash
 cp .env.example .env
@@ -365,7 +379,7 @@ QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 ENABLE_EAN_DETECTION=true
 ```
 
-### 8d. Esecuzione
+### 8e. Esecuzione
 
 ```bash
 source .venv/bin/activate
@@ -456,9 +470,43 @@ YOLO_IMG_SIZE=640
 CROP_MAX_DIMENSION=1280
 ```
 
-### 9e. Comandi vLLM (dalla model card ufficiale)
+### 9e. Parametri di sampling (raccomandazioni ufficiali Qwen3.6)
 
-Il comando vLLM dalla [model card ufficiale HuggingFace](https://huggingface.co/Qwen/Qwen3.6-35B-A3B):
+I parametri utilizzati in `vllm_main.py` seguono le
+[raccomandazioni ufficiali del model card FP8](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8#best-practices)
+per **non-thinking mode (general tasks)**.
+
+| Parametro | Valore | Motivazione |
+| ----------- | -------- | ------------- |
+| `temperature` | `0.7` | Raccomandazione ufficiale non-thinking mode |
+| `top_p` | `0.8` | Raccomandazione ufficiale non-thinking mode |
+| `top_k` | `20` | Raccomandazione ufficiale |
+| `presence_penalty` | `1.5` | Anti-ripetizione (range ufficiale: 0–2) |
+| Thinking mode | Disabilitato | Via `extra_body.chat_template_kwargs.enable_thinking: False` |
+
+> **Nota**: Qwen3.6 **non supporta** `/think` e `/nothink`. Il thinking mode si
+> disabilita esclusivamente via `chat_template_kwargs` nel payload API (per vLLM)
+> o via `--chat-template-kwargs` nella CLI (per llama.cpp).
+
+### 9f. Multi-Token Prediction (MTP)
+
+Qwen3.6 è addestrato con MTP heads native (“trained with multi-steps”) che permettono
+speculative decoding senza bisogno di un draft model separato. vLLM supporta MTP
+tramite `--speculative-config`.
+
+| Parametro | Valore |
+| ----------- | -------- |
+| `method` | `qwen3_next_mtp` |
+| `num_speculative_tokens` | `2` |
+| Speedup stimato | ~20-30% sulla generazione token |
+| Attivazione | `VLLM_ENABLE_MTP=true` nel `.env` |
+
+MTP è **opt-in** (default: `false`) perché è una feature sperimentale.
+Se causa instabilità, disabilitare rimuovendo `VLLM_ENABLE_MTP=true` dal `.env`.
+
+### 9g. Comandi vLLM (dalla model card ufficiale)
+
+Il comando vLLM dalla [model card ufficiale HuggingFace](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8):
 
 ```bash
 vllm serve Qwen/Qwen3.6-35B-A3B-FP8 \
@@ -479,7 +527,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B-FP8 \
 - `--enable-prefix-caching`: sistema prompt riutilizzato nella KV cache
 - `--gpu-memory-utilization 0.85`: lascia 15% VRAM per YOLO + OS
 
-### 9f. Esecuzione di `vllm_main.py`
+### 9h. Esecuzione di `vllm_main.py`
 
 ```bash
 source .venv/bin/activate
@@ -497,7 +545,7 @@ Il primo avvio:
 
 Log vLLM: `output/vllm_server.log`
 
-### 9g. Verifica che vLLM sia pronto
+### 9i. Verifica che vLLM sia pronto
 
 ```bash
 # Check modelli disponibili
@@ -507,7 +555,7 @@ curl http://localhost:8001/v1/models
 curl http://localhost:8001/health
 ```
 
-### 9h. Output atteso
+### 9j. Output atteso
 
 ```txt
 ⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… this takes 30-60 s on first launch.
@@ -522,7 +570,7 @@ Pipeline complete avg_ms_per_image=870
 
 **Target raggiunto**: ~850 ms/immagine con YOLO + OCR + I/O.
 
-### 9i. Monitoraggio VRAM
+### 9k. Monitoraggio VRAM
 
 ```bash
 watch -n 2 nvidia-smi
@@ -540,32 +588,9 @@ Allocazione tipica con vLLM su RTX 6000 PRO 96 GB:
 
 ---
 
-## 10. Esecuzione della pipeline
+## 10. Output e risultati
 
-### 10a. Scelta dello script
-
-```bash
-# ── TARGET < 1 s/immagine (RACCOMANDATO) ──
-source .venv/bin/activate
-pip install vllm>=0.19.0
-python3 src/vllm_main.py
-
-# ── llama.cpp V2 (~1.0–1.5 s/immagine, raccomandato) ──
-source .venv/bin/activate
-python3 src/full-gpu_main_v2.py
-```
-
-### 10b. Avvio in tmux (consigliato)
-
-```bash
-tmux new -s tosano
-source .venv/bin/activate
-python3 src/vllm_main.py   # oppure: python3 src/full-gpu_main_v2.py
-```
-
-**Nota**: `vllm-server` viene avviato automaticamente se non è già in ascolto su port 8001 (vLLM) o 8080 (llama.cpp).
-
-### 10c. Output atteso
+### 10a. Struttura output
 
 ```txt
 output_test/
@@ -578,10 +603,22 @@ output_test/
 
 Il report `mocr_batch_results.md` include una sezione **Timing Summary** con avg/min/max per step (barcode, YOLO, crop, OCR) e tempo totale pipeline.
 
-### 10d. Staccare e riattaccare tmux
+### 10b. Uso di tmux (consigliato)
 
 ```bash
-# Staccare (Ctrl+B, poi D)
+tmux new -s tosano
+source .venv/bin/activate
+
+# Eseguire lo script del backend scelto (cfr. sezioni 8d o 9f)
+python3 src/vllm_main.py
+# oppure
+python3 src/full-gpu_main_v2.py
+```
+
+Staccare e riattaccare:
+
+```bash
+# Staccare: Ctrl+B, poi D
 tmux attach -t tosano
 tmux kill-session -t tosano
 ```

@@ -86,8 +86,14 @@ VLLM_REASONING_PARSER: str = "qwen3"          # Required for Qwen3.6
 VLLM_TENSOR_PARALLEL_SIZE: int = int(
     os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "1")
 )
-# Note: Qwen3.6-35B-A3B runs natively in BF16 on Blackwell.
-# No --quantization flag needed.
+# Note: Qwen3.6-35B-A3B-FP8 is the official FP8 quantization (~35 GB vs ~72 GB BF16).
+# Fine-grained FP8 with block size 128 — quality "nearly identical" (official Qwen).
+# On Blackwell (sm_120) FP8 tensor cores give ~2× throughput vs BF16.
+
+# Multi-Token Prediction (speculative decoding nativo Qwen3.6)
+# Potenziale ~20-30% speedup sulla generazione token.
+# Sperimentale — disabilitare se causa instabilità.
+VLLM_ENABLE_MTP: bool = os.environ.get("VLLM_ENABLE_MTP", "false").lower() == "true"
 
 # ── vLLM server lifecycle ────────────────────────────────────────────────────
 VLLM_SERVER_LOG_PATH: Path = Path("output/vllm_server.log")
@@ -207,10 +213,17 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         "--enable-chunked-prefill",
         "--enable-prefix-caching",
         "--reasoning-parser", VLLM_REASONING_PARSER,
-        # --language-model-only disables vision-specific overhead for text-only OCR
-        # Only use if you know the model doesn't need vision:
-        # "--language-model-only",
     ]
+
+    # MTP: Multi-Token Prediction — speculative decoding nativo di Qwen3.6.
+    # Usa le MTP heads del modello per "draft" di 2 token alla volta.
+    # Per OCR (output deterministico) il tasso di accettazione è alto → ~20-30% speedup.
+    if VLLM_ENABLE_MTP:
+        command_line.extend([
+            "--speculative-config",
+            '{"method":"qwen3_next_mtp","num_speculative_tokens":2}',
+        ])
+        logger.info("MTP speculative decoding enabled (num_speculative_tokens=2)")
 
     logger.info("Starting vLLM subprocess", command=" ".join(command_line))
 
@@ -429,10 +442,19 @@ def _transcribe_label_image(
                 ],
             },
         ],
-        "temperature": 0.0,                       # Greedy: deterministic, fastest
+        # Official Qwen3.6 sampling for non-thinking mode (general tasks):
+        # https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8#best-practices
+        "temperature": 0.7,
+        "top_p": 0.8,
         "max_tokens": TRANSCRIPTION_MAX_OUTPUT_TOKENS,
-        "top_k": 1,
+        "presence_penalty": 1.5,                       # Official anti-repetition
         "stop": ["<|im_end|>"],
+        # Disable thinking mode — official method for vLLM:
+        # "Qwen3.6 does not officially support /think and /nothink"
+        "extra_body": {
+            "top_k": 20,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
 
     chat_url: str = f"{vllm_base_url}/chat/completions"
