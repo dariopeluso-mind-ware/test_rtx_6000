@@ -36,7 +36,7 @@ Optimizations vs original:
     - Crop resize: 1280px max side before base64 encoding
     - Persistent httpx.Client: reuse TCP connection across requests
     - System prompt: KV cache hit for fixed prompt across all images
-    - YOLO imgsz=1024: explicit size matching engine export
+    - YOLO imgsz=640: explicit size matching engine export
     - llama-server CLI: --batch-size 2048 --ubatch-size 512 -t 8
     - Per-step timing in batch report
 
@@ -181,7 +181,7 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # --- YOLO model paths ---
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
-YOLO_IMG_SIZE: int = 1024                    # Must match TensorRT engine export size
+YOLO_IMG_SIZE: int = 640                     # Must match TensorRT engine export size
 
 # --------------------------------------------------------------------------------------------------
 # Global state – shared across function calls without passing as arguments.
@@ -1187,10 +1187,10 @@ def main() -> None:
     # Warmup — YOLO TensorRT kernel compilation with a representative image size.
     #
     # TensorRT JIT-compiles CUDA kernels on the first inference for the current GPU architecture.
-    # We use a realistic image size (1024×1024) to avoid recompilation on first real image.
+    # We use a realistic image size (640×640) to avoid recompilation on first real image.
     # NOTE: llama-server performs an automatic warmup pass during boot — no extra action needed.
     # ----------------------------------------------------------------------------------------------
-    logger.info("[Warmup] Running YOLO TensorRT warmup pass (1024×1024)…")
+    logger.info("[Warmup] Running YOLO TensorRT warmup pass (640×640)…")
     warmup_start = time.perf_counter()
 
     try:
