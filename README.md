@@ -325,7 +325,7 @@ Le seguenti ottimizzazioni sono già integrate in `full-gpu_main.py`:
 |---------------|----------------|
 | Immagine caricata 1 volta (non 3) | ~100 ms/immagine |
 | Barcode pyzbar downscaled a 1500px | ~600 ms/immagine |
-| YOLO TensorRT con imgsz=1024 (kernel ottimizzati) | ~400 ms/immagine |
+| YOLO TensorRT con imgsz=640 (kernel ottimizzati) | ~400 ms/immagine |
 | llama-server: `--batch-size 2048 --ubatch-size 512 -t 8` | ~15-25% OCR |
 | Greedy sampling (temperature=0.0, top_k=1) | ~10-20% OCR |
 | Persistent httpx.Client (connection reuse) | ~5-10% OCR |
@@ -375,7 +375,7 @@ vLLM offre funzionalità non disponibili in llama.cpp che accelerano drasticamen
 | **Chunked Prefill** | Evita prefill/decode conflict in batch misti |
 | **Prefix Caching** | System prompt KV cache riutilizzato per tutte le immagini |
 | **Continuous Batching** | Schedulazione dinamica a livello di iterazione |
-| **FP8 nativo Blackwell** | Tensor core nativi per BF16 (il modello gira così) |
+| **FP8 nativo Blackwell** | Tensor core FP8 — ~35 GB vs ~72 GB BF16, ~1.5-2x più veloce |
 | **Reasoning parser** | Supporto nativo per Qwen3.6 |
 
 **Stima con vLLM**: **< 1 s/immagine** (dopo warmup, per immagini etichetta typicali)
@@ -397,23 +397,28 @@ pip install vllm>=0.19.0
 
 ### 9c. Modello
 
-Il modello è `Qwen/Qwen3.6-35B-A3B` (repo ufficiale HuggingFace).
+Il modello raccomandato è `Qwen/Qwen3.6-35B-A3B-FP8` (quantizzazione FP8 ufficiale Qwen).
 vLLM scaricherà automaticamente i pesi alla prima esecuzione.
 
-**Dimensione**: ~72 GB (pesi BF16 in safetensors)
+| Variante | VRAM pesi | Qualità | Note |
+|----------|-----------|---------|------|
+| **FP8** (`Qwen/Qwen3.6-35B-A3B-FP8`) | ~35 GB | Quasi identica | **Raccomandato** — più VRAM per KV cache |
+| BF16 (`Qwen/Qwen3.6-35B-A3B`) | ~72 GB | Full precision | Solo se serve qualità massima |
+
+**Dimensione download FP8**: ~35 GB (safetensors FP8)
 
 Per pre-scaricare (consigliato):
 
 ```bash
 # Con huggingface-cli
-huggingface-cli download Qwen/Qwen3.6-35B-A3B
+huggingface-cli download Qwen/Qwen3.6-35B-A3B-FP8
 ```
 
 ### 9d. Configurazione (`.env`)
 
 ```bash
 # Aggiungere a .env (o creare .env con solo queste variabili)
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
 VLLM_PORT=8001
 VLLM_TENSOR_PARALLEL_SIZE=1
 ```
@@ -422,14 +427,14 @@ VLLM_TENSOR_PARALLEL_SIZE=1
 
 ```ini
 # ── vLLM settings ──────────────────────────────
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
 VLLM_PORT=8001
 VLLM_TENSOR_PARALLEL_SIZE=1
 
 # ── Pipeline settings ─────────────────────────
 ENABLE_EAN_DETECTION=true
 SAVE_CROPS=false
-YOLO_IMG_SIZE=1024
+YOLO_IMG_SIZE=640
 CROP_MAX_DIMENSION=1280
 ```
 
@@ -438,8 +443,8 @@ CROP_MAX_DIMENSION=1280
 Il comando vLLM dalla [model card ufficiale HuggingFace](https://huggingface.co/Qwen/Qwen3.6-35B-A3B):
 
 ```bash
-vllm serve Qwen/Qwen3.6-35B-A3B \
-  --port 8000 \
+vllm serve Qwen/Qwen3.6-35B-A3B-FP8 \
+  --port 8001 \
   --tensor-parallel-size 1 \
   --max-model-len 8192 \
   --gpu-memory-utilization 0.85 \
@@ -465,7 +470,7 @@ python3 src/vllm_main.py
 ```
 
 Il primo avvio:
-1. Scaricherà il modello Qwen3.6-35B-A3B (~72 GB, varios minuti)
+1. Scaricherà il modello Qwen3.6-35B-A3B-FP8 (~35 GB, vari minuti)
 2. Avvierà vLLM server su port 8001
 3. Caricherà il modello in VRAM
 4. Compilerà i kernel TensorRT per YOLO
@@ -507,7 +512,7 @@ Allocazione tipica con vLLM su RTX 6000 PRO 96 GB:
 
 | Componente | VRAM |
 |-----------|------|
-| Qwen3.6-35B-A3B BF16 | ~35 GB |
+| Qwen3.6-35B-A3B FP8 | ~35 GB |
 | YOLO OBB TensorRT | ~50 MB |
 | KV cache vLLM | ~50 GB |
 | Safety margin | ~10 GB |
@@ -668,12 +673,12 @@ pip install vllm>=0.19.0
 
 # 5. Crea .env per vLLM
 cat > .env << 'EOF'
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B
+VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
 VLLM_PORT=8001
 VLLM_TENSOR_PARALLEL_SIZE=1
 ENABLE_EAN_DETECTION=true
 SAVE_CROPS=false
-YOLO_IMG_SIZE=1024
+YOLO_IMG_SIZE=640
 CROP_MAX_DIMENSION=1280
 EOF
 
@@ -686,4 +691,5 @@ python3 src/vllm_main.py
 ---
 
 *Documento generato per il deployment su RTX 6000 PRO Blackwell (sm_120, 96 GB VRAM).*
-*Modello: `Qwen/Qwen3.6-35B-A3B` — vLLM >= 0.19.0 — HuggingFace model card: huggingface.co/Qwen/Qwen3.6-35B-A3B*
+*Modello vLLM: `Qwen/Qwen3.6-35B-A3B-FP8` — vLLM >= 0.19.0 — [HuggingFace model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)*
+*Modello llama.cpp: `unsloth/Qwen3.6-35B-A3B-GGUF` (UD-Q4_K_XL)*

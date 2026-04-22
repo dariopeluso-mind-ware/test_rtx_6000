@@ -36,7 +36,7 @@ Environment Variables:
     VLLM_TENSOR_PARALLEL_SIZE : GPU count (default: 1)
     ENABLE_EAN_DETECTION   : "true"/"false" (default: "true")
     SAVE_CROPS             : "true"/"false" (default: "false")
-    YOLO_IMG_SIZE          : YOLO input size (default: 1024)
+    YOLO_IMG_SIZE          : YOLO input size (default: 640)
     CROP_MAX_DIMENSION     : max crop dimension before base64 (default: 1280)
 """
 
@@ -73,8 +73,9 @@ VLLM_PORT: int = int(os.environ.get("VLLM_PORT", "8001"))
 VLLM_BASE_URL: str = f"http://localhost:{VLLM_PORT}/v1"
 VLLM_MODEL_REPO_ID: str = os.environ.get(
     "VLLM_MODEL_REPO_ID",
-    # Qwen3.6-35B-A3B official HuggingFace repo (same base model as GGUF)
-    "Qwen/Qwen3.6-35B-A3B",
+    # Qwen3.6-35B-A3B-FP8: official FP8 quant (~35 GB vs ~72 GB BF16, near-identical quality)
+    # Alternative BF16 (full precision): Qwen/Qwen3.6-35B-A3B
+    "Qwen/Qwen3.6-35B-A3B-FP8",
 )
 
 # vLLM runtime settings (from official HF model card)
@@ -130,7 +131,7 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # ── YOLO model paths ───────────────────────────────────────────────────────────
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
-YOLO_IMG_SIZE: int = int(os.environ.get("YOLO_IMG_SIZE", "1024"))
+YOLO_IMG_SIZE: int = int(os.environ.get("YOLO_IMG_SIZE", "640"))
 
 # ── Global state ───────────────────────────────────────────────────────────────
 vllm_subprocess_handle: subprocess.Popen | None = None
@@ -768,7 +769,7 @@ def main() -> None:
     logger.info("[Step 2/3] vLLM server ready ✓", url=VLLM_BASE_URL)
 
     # Warmup YOLO TensorRT kernels
-    logger.info("[Warmup] Running YOLO TensorRT warmup pass (1024×1024)…")
+    logger.info(f"[Warmup] Running YOLO TensorRT warmup pass ({YOLO_IMG_SIZE}×{YOLO_IMG_SIZE})…")
     t_warmup = time.perf_counter()
     try:
         dummy = np.zeros((YOLO_IMG_SIZE, YOLO_IMG_SIZE, 3), dtype=np.uint8)
