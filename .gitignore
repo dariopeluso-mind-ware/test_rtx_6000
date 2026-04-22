@@ -70,4 +70,6 @@ Thumbs.db
 # Node (frontend)
 node_modules/
 package-lock.json
+data
+etichette_esempio
 
