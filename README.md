@@ -8,8 +8,9 @@
 Questo progetto offre **due backend OCR** alternativi, entrambi compatibili con Qwen3.6-35B-A3B:
 
 | Backend | Script | VRAM | Velocità | Note |
-|---------|--------|------|----------|------|
-| llama.cpp | `src/full-gpu_main.py` | 96 GB | ~1.3–2.0 s/img | Più semplice, no build extra |
+| ---------- | -------- | ------ | ---------- | ------ |
+| llama.cpp V2 | `src/full-gpu_main_v2.py` | 96 GB | ~1.0–1.5 s/img | **Raccomandato** — anti-loop, prefetch, KV q8 |
+| llama.cpp V1 | `src/full-gpu_main.py` | 96 GB | ~1.3–2.0 s/img | Baseline (mantenuto per confronto) |
 | **vLLM** | `src/vllm_main.py` | 96 GB | **< 1 s/img** | Target principale |
 
 Questo documento copre entrambi i backend. La Sezione 9 è dedicata a vLLM.
@@ -19,7 +20,7 @@ Questo documento copre entrambi i backend. La Sezione 9 è dedicata a vLLM.
 ## Hardware di riferimento
 
 | Ambiente | GPU | VRAM | Note |
-|----------|-----|------|------|
+| ---------- | ----- | ------ | ------ |
 | Development (locale) | RTX PRO 1000 Blackwell | 8 GB | Configurazione attuale |
 | Cloud target | RTX 6000 PRO Blackwell | 96 GB | Deployment remoto via SSH |
 
@@ -34,10 +35,10 @@ Questo documento descrive come replicare l'ambiente sulla macchina cloud RTX 600
 3. [CUDA Toolkit 12.8 / 13.x](#3-cuda-toolkit-128--13x)
 4. [Setup del progetto](#4-setup-del-progetto)
 5. [Environment Python](#5-environment-python)
-6. [Build di llama.cpp con CUDA](#6-build-di-llamacpp-con-cuda) *(solo per `full-gpu_main.py`)*
-7. [Pre-download dei pesi GGUF](#7-pre-download-dei-pesi-gguf) *(solo per `full-gpu_main.py`)*
+6. [Build di llama.cpp con CUDA](#6-build-di-llamacpp-con-cuda)
+7. [Pre-download dei pesi GGUF](#7-pre-download-dei-pesi-gguf)
 8. [Esecuzione Full-GPU llama.cpp (96 GB VRAM)](#8-esecuzione-full-gpu-llamacpp-96-gb-vram)
-9. **[Esecuzione vLLM (target < 1 s/immagine)](#9-esecuzione-vllm-target-1-s-immagine)**
+9. **[Esecuzione vLLM](#9-esecuzione-vllm)**
 10. [Esecuzione della pipeline](#10-esecuzione-della-pipeline)
 11. [Recupero dei risultati](#11-recupero-dei-risultati)
 12. [Troubleshooting](#12-troubleshooting)
@@ -182,11 +183,12 @@ Struttura dei file dopo il clone:
 ├── best.pt               # YOLO PyTorch model (~21 MB) — usato per export TensorRT
 ├── best.engine            # YOLO TensorRT FP16 (generato al primo avvio)
 ├── src/
-│   ├── main.py            # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
-│   ├── full-gpu_main.py  # Script llama.cpp (96 GB VRAM, full GPU, TensorRT)
-│   └── vllm_main.py      # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img) ⭐
-├── test/                  # Immagini di input per batch processing
-├── llama.cpp/             # Solo per full-gpu_main.py (clonato separatamente)
+│   ├── main.py               # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
+│   ├── full-gpu_main.py      # Script llama.cpp V1 (baseline)
+│   ├── full-gpu_main_v2.py   # Script llama.cpp V2 (ottimizzato — raccomandato) ⭐
+│   └── vllm_main.py          # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img) ⭐
+├── test/                      # Immagini di input per batch processing
+├── llama.cpp/                 # Solo per full-gpu_main*.py (clonato separatamente)
 ├── requirements.txt       # Dipendenze Python
 └── output/                # Output processing (generato)
 ```
@@ -239,7 +241,9 @@ python -c "import ultralytics; import httpx; import pyzbar; import PIL; import s
 
 ---
 
-## 6. Build di llama.cpp con CUDA *(solo per `full-gpu_main.py`)*
+## 6. Build di llama.cpp con CUDA
+
+*(Solo per `full-gpu_main*.py`; NON necessario per `vllm_main.py`)*
 
 ### 6a. Configurazione CMake
 
@@ -274,7 +278,9 @@ ls -lh llama-server
 
 ---
 
-## 7. Pre-download dei pesi GGUF *(solo per `full-gpu_main.py`)*
+## 7. Pre-download dei pesi GGUF
+
+*(Solo per `full-gpu_main*.py`)*
 
 I pesi vengono scaricati automaticamente alla prima esecuzione tramite `huggingface_hub`.
 Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è **pubblico** — non serve login né token HuggingFace.
@@ -299,30 +305,28 @@ hf download \
 
 ## 8. Esecuzione Full-GPU llama.cpp (96 GB VRAM)
 
-Con 96 GB VRAM, usare `src/full-gpu_main.py` al posto di `src/main.py`.
+Con 96 GB VRAM, usare `src/full-gpu_main_v2.py` (raccomandato) al posto di `src/main.py`.
 
-### 8a. Differenze rispetto a `main.py`
+### 8a. V1 vs V2
 
-| Feature | `main.py` (dev, 8 GB) | `full-gpu_main.py` (prod, 96 GB) |
-|---------|------------------------|-----------------------------------|
-| MoE experts | CPU (`--cpu-moe`) | GPU (tutti i 256 esperti in VRAM) |
-| YOLO inference | ONNX su CPU | TensorRT FP16 su GPU |
-| Thinking mode | Abilitato | Disabilitato (`--chat-template-kwargs`) |
-| Flash Attention | No | Sì (`--flash-attn`) |
-| Continuous batching | No | Sì (`--cont-batching`) |
-| Prompt caching | Disabilitato | Abilitato (`--cache-prompt`) |
-| Context size | 8192 | 16384 |
-| max_tokens | 8192 | 2048 |
-| Timing report | No | Sì (per-step, per-image, totale) |
-| EAN detection | Sempre | Opzionale (env var) |
-| GGUF model | Hardcoded Q4_K_M | Configurabile via env var |
+| Feature | `full-gpu_main.py` (V1) | `full-gpu_main_v2.py` (V2 — raccomandato) |
+| --------- | ------------------------- | -------------------------------------------- |
+| Sliding Window Attention | Standard | `--swa-full` (fix repetition loop) |
+| KV cache | FP16 | `q8_0` (~50% VRAM savings) |
+| Context size | 16384 | 4096 (basato su analisi P99=3008 token) |
+| Anti-ripetizione | Nessuna | `presence_penalty=1.5` (raccomandazione ufficiale Qwen3.6) |
+| Image loading | Sincrono | Async prefetch (ThreadPoolExecutor, 2 ahead) |
+| Crop warpAffine | Full resolution | Downscale a 2048px prima di warpAffine |
+| Velocità stimata | ~1.3–2.0 s/img | **~1.0–1.5 s/img** |
 
-### 8b. Ottimizzazioni applicate (`full-gpu_main.py`)
+V2 risolve il **bug di ripetizione infinita** osservato nell'analisi batch (image #18: 12.2s, 117 righe ripetute).
 
-Le seguenti ottimizzazioni sono già integrate in `full-gpu_main.py`:
+### 8b. Ottimizzazioni applicate
+
+**V1** (già integrate in `full-gpu_main.py`):
 
 | Ottimizzazione | Impatto stimato |
-|---------------|----------------|
+| --------------- | ---------------- |
 | Immagine caricata 1 volta (non 3) | ~100 ms/immagine |
 | Barcode pyzbar downscaled a 1500px | ~600 ms/immagine |
 | YOLO TensorRT con imgsz=640 (kernel ottimizzati) | ~400 ms/immagine |
@@ -330,7 +334,16 @@ Le seguenti ottimizzazioni sono già integrate in `full-gpu_main.py`:
 | Greedy sampling (temperature=0.0, top_k=1) | ~10-20% OCR |
 | Persistent httpx.Client (connection reuse) | ~5-10% OCR |
 
-**Stima totale con llama.cpp**: ~1.3–2.0 s/immagine (dopo warmup)
+**V2** (aggiunte in `full-gpu_main_v2.py`):
+
+| Ottimizzazione | Impatto stimato |
+| --------------- | ---------------- |
+| `--swa-full` | Fix loop ripetizione (12s → 2s su immagini problematiche) |
+| `presence_penalty=1.5` | Safety net anti-ripetizione (raccomandazione ufficiale) |
+| `--cache-type-k/v q8_0` | ~5-10% throughput improvement |
+| Context 16384→4096 | Meno VRAM, marginale speedup |
+| Async image prefetch | Elimina cold-cache I/O RunPod (load 5s → ~0ms) |
+| Downscale pre-warpAffine | Crop time ~50ms → ~15ms |
 
 ### 8c. Configurazione (`.env`)
 
@@ -344,6 +357,10 @@ Contenuto di `.env`:
 # Modello GGUF (default: UD-Q4_K_XL)
 QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 
+# Quantizzazione più aggressiva — ~25% più veloce ma possibile degradazione OCR
+# Decommentare per test A/B (richiede download ~16.8 GB):
+# QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf
+
 # Abilitare/disabilitare ricerca EAN barcode (default: true)
 ENABLE_EAN_DETECTION=true
 ```
@@ -352,7 +369,7 @@ ENABLE_EAN_DETECTION=true
 
 ```bash
 source .venv/bin/activate
-python3 src/full-gpu_main.py
+python3 src/full-gpu_main_v2.py
 ```
 
 **Nota**: `llama-server` viene avviato automaticamente se non è già in ascolto su port 8080.
@@ -361,7 +378,7 @@ Log disponibile in: `output/llama_server.log`.
 
 ---
 
-## 9. Esecuzione vLLM (target < 1 s/immagine)
+## 9. Esecuzione vLLM
 
 > **Questa è la configurazione raccomandata per il target < 1 secondo per immagine.**
 
@@ -370,7 +387,7 @@ Log disponibile in: `output/llama_server.log`.
 vLLM offre funzionalità non disponibili in llama.cpp che accelerano drasticamente l'OCR:
 
 | Feature vLLM | Beneficio per OCR |
-|--------------|-------------------|
+| -------------- | ------------------- |
 | **PagedAttention v2** | KV cache in 4KB page — fino a 40% riduzione memoria |
 | **Chunked Prefill** | Evita prefill/decode conflict in batch misti |
 | **Prefix Caching** | System prompt KV cache riutilizzato per tutte le immagini |
@@ -390,6 +407,7 @@ pip install vllm>=0.19.0
 ```
 
 **Requisiti aggiuntivi** (installati automaticamente da vLLM):
+
 - PyTorch con supporto CUDA
 - Triton compiler
 
@@ -401,7 +419,7 @@ Il modello raccomandato è `Qwen/Qwen3.6-35B-A3B-FP8` (quantizzazione FP8 uffici
 vLLM scaricherà automaticamente i pesi alla prima esecuzione.
 
 | Variante | VRAM pesi | Qualità | Note |
-|----------|-----------|---------|------|
+| ---------- | ----------- | --------- | ------ |
 | **FP8** (`Qwen/Qwen3.6-35B-A3B-FP8`) | ~35 GB | Quasi identica | **Raccomandato** — più VRAM per KV cache |
 | BF16 (`Qwen/Qwen3.6-35B-A3B`) | ~72 GB | Full precision | Solo se serve qualità massima |
 
@@ -455,6 +473,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B-FP8 \
 ```
 
 **Flag importanti**:
+
 - `--reasoning-parser qwen3`: obbligatorio per Qwen3.6
 - `--enable-chunked-prefill`: accelera il prefill delle immagini
 - `--enable-prefix-caching`: sistema prompt riutilizzato nella KV cache
@@ -470,6 +489,7 @@ python3 src/vllm_main.py
 ```
 
 Il primo avvio:
+
 1. Scaricherà il modello Qwen3.6-35B-A3B-FP8 (~35 GB, vari minuti)
 2. Avvierà vLLM server su port 8001
 3. Caricherà il modello in VRAM
@@ -489,7 +509,7 @@ curl http://localhost:8001/health
 
 ### 9h. Output atteso
 
-```
+```txt
 ⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… this takes 30-60 s on first launch.
 ...
 2026-04-22 12:00:00 [info] [Step 1/3] YOLO OBB ready ✓
@@ -511,7 +531,7 @@ watch -n 2 nvidia-smi
 Allocazione tipica con vLLM su RTX 6000 PRO 96 GB:
 
 | Componente | VRAM |
-|-----------|------|
+| ----------- | ------ |
 | Qwen3.6-35B-A3B FP8 | ~35 GB |
 | YOLO OBB TensorRT | ~50 MB |
 | KV cache vLLM | ~50 GB |
@@ -530,9 +550,9 @@ source .venv/bin/activate
 pip install vllm>=0.19.0
 python3 src/vllm_main.py
 
-# ── llama.cpp (~1.3–2 s/immagine) ──
+# ── llama.cpp V2 (~1.0–1.5 s/immagine, raccomandato) ──
 source .venv/bin/activate
-python3 src/full-gpu_main.py
+python3 src/full-gpu_main_v2.py
 ```
 
 ### 10b. Avvio in tmux (consigliato)
@@ -540,14 +560,14 @@ python3 src/full-gpu_main.py
 ```bash
 tmux new -s tosano
 source .venv/bin/activate
-python3 src/vllm_main.py   # oppure: python3 src/full-gpu_main.py
+python3 src/vllm_main.py   # oppure: python3 src/full-gpu_main_v2.py
 ```
 
 **Nota**: `vllm-server` viene avviato automaticamente se non è già in ascolto su port 8001 (vLLM) o 8080 (llama.cpp).
 
 ### 10c. Output atteso
 
-```
+```txt
 output_test/
 ├── crops/
 │   ├── crop_17.jpg          # etichetta croppata
@@ -617,6 +637,7 @@ pkill -9 -f vllm
 
 **Causa**: Troppi modelli o KV cache in VRAM.
 **Soluzione**: Ridurre `--gpu-memory-utilization`:
+
 ```bash
 # In .env:
 VLLM_GPU_MEMORY_UTILIZATION=0.80
