@@ -250,10 +250,16 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         tp_size=VLLM_TENSOR_PARALLEL_SIZE,
     )
 
-    # vLLM command (from official HF model card: https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
+    # Wrapper script che forza la piattaforma CUDA prima dell'import di vLLM.
+    # Necessario perché in container RunPod NVML (libnvidia-ml.so) non è accessibile,
+    # e l'auto-detection di vLLM (pynvml.nvmlInit()) fallisce DURANTE il parsing
+    # degli argomenti CLI — prima che --device cuda possa essere letto.
+    # Il wrapper usa NonNvmlCudaPlatform (basato su torch.cuda.*) come fallback.
+    wrapper_script: Path = Path(__file__).parent / "vllm_server_wrapper.py"
+
     command_line: list[str] = [
         sys.executable,
-        "-m", "vllm.entrypoints.openai.api_server",
+        str(wrapper_script),
         "--model", VLLM_MODEL_REPO_ID,
         "--port", str(VLLM_PORT),
         "--tensor-parallel-size", str(VLLM_TENSOR_PARALLEL_SIZE),
@@ -280,15 +286,11 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
     VLLM_SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_file_handle = open(VLLM_SERVER_LOG_PATH, "w", encoding="utf-8")
 
-    # Costruire l'environment per il subprocess vLLM.
-    # In container RunPod NVML spesso non è accessibile dal subprocess figlio,
-    # causando "Failed to infer device type". Forzare VLLM_TARGET_DEVICE=cuda
-    # salta l'auto-detection e usa CUDA direttamente.
+    # Environment per il subprocess vLLM.
+    # NVIDIA container runtime vars — assicurare che il subprocess veda la GPU.
     vllm_env = os.environ.copy()
     vllm_env.update({
-        "VLLM_TARGET_DEVICE": "cuda",
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
-        # NVIDIA container runtime — assicurare che il subprocess veda la GPU
         "NVIDIA_VISIBLE_DEVICES": os.environ.get("NVIDIA_VISIBLE_DEVICES", "all"),
         "NVIDIA_DRIVER_CAPABILITIES": os.environ.get(
             "NVIDIA_DRIVER_CAPABILITIES", "compute,utility"
