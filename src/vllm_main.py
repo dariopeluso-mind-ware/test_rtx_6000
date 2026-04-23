@@ -367,9 +367,8 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         # vLLM spawna worker processes — con fork() ereditano lo stato CUDA
         # corrotto dal parent. spawn() crea processi puliti.
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        # FlashInfer MoE backend — raccomandato per Blackwell (sm_120) al posto di TRITON.
-        # FlashInfer ha kernel FP8 ottimizzati per le architetture più recenti.
-        "VLLM_USE_FLASHINFER_MOE_FP8": "1",
+        # FlashInfer MoE non supporta l'architettura Qwen3.6 (256 expert + shared)
+        # in vLLM 0.19.1 — si usa TRITON (auto-selected). Riprovare con vLLM >= 0.20.
     })
 
     vllm_subprocess_handle = subprocess.Popen(
