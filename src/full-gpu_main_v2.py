@@ -1152,7 +1152,7 @@ def main() -> None:
     # Directory setup
     # ----------------------------------------------------------------------------------------------
     input_images_dir: Path = Path("etichette_esempio")
-    output_root_dir: Path = Path("output_test")
+    output_root_dir: Path = Path("output_etichette_esempio")
     cropped_labels_dir: Path = output_root_dir / "crops"
     batch_report_path: Path = output_root_dir / "mocr_batch_results.md"
 
