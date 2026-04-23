@@ -180,7 +180,7 @@ VLLM_SERVER_PROGRESS_LOG_INTERVAL_SEC: float = 30.0  # Intervallo log di stato d
 # ── Transcription API settings ───────────────────────────────────────────────────
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
 TRANSCRIPTION_MAX_RETRIES: int = 3
-TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 1024  # Testo etichette tipicamente <500 token
+TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 2048  # Testo etichette tipicamente <500 token, potrebbe essere inferiore
 
 TRANSCRIPTION_SYSTEM_PROMPT: str = (
     "You are a precise OCR system. Read all the text in the image. "
