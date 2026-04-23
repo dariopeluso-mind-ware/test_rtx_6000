@@ -76,7 +76,7 @@ VLLM_MODEL_REPO_ID: str = "Qwen/Qwen3.6-35B-A3B-FP8"
 
 # vLLM runtime settings (from official HF model card)
 VLLM_MAX_MODEL_LEN: int = 8192
-VLLM_GPU_MEMORY_UTILIZATION: float = 0.9
+VLLM_GPU_MEMORY_UTILIZATION: float = 0.85
 VLLM_MAX_NUM_SEQS: int = 8
 VLLM_REASONING_PARSER: str = "qwen3"          # Required for Qwen3.6
 VLLM_TENSOR_PARALLEL_SIZE: int = 1
