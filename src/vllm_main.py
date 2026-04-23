@@ -66,7 +66,7 @@ from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
 # ── vLLM server settings ───────────────────────────────────────────────────────
 # Porta del server vLLM (default: 8001, diversa da llama-server che usa 8080)
-VLLM_PORT: int = 8001
+VLLM_PORT: int = 8000
 VLLM_BASE_URL: str = f"http://localhost:{VLLM_PORT}/v1"
 
 # Repo ID del modello Qwen3.6-35B-A3B su HuggingFace
@@ -180,17 +180,58 @@ def shutdown_vllm_server_on_exit() -> None:
 atexit.register(shutdown_vllm_server_on_exit)
 
 
+def _is_vllm_models_response_valid(response: httpx.Response) -> bool:
+    """
+    Verifies that the response to /v1/models is genuinely from vLLM
+    (and not a RunPod nginx placeholder / reverse proxy HTML page).
+
+    OpenAI-compatible servers return:
+        { "object": "list", "data": [ ...model objects... ] }
+
+    RunPod nginx placeholders return HTML.
+    """
+    if response.status_code != 200:
+        return False
+    content_type = response.headers.get("content-type", "").lower()
+    if "application/json" not in content_type:
+        return False
+    try:
+        data = response.json()
+    except Exception:
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("object") == "list"
+        and isinstance(data.get("data"), list)
+    )
+
+
 def ensure_vllm_server_running(vllm_base_url: str) -> None:
     """Check if vLLM server is running; if not, start it as a subprocess."""
     global vllm_subprocess_handle
 
-    # Probe existing server
+    # Probe existing server — validate JSON structure, not just HTTP 200.
+    # This prevents RunPod nginx placeholders (HTML 200) from being mistaken
+    # for a real vLLM OpenAI-compatible server.
     try:
         with httpx.Client(timeout=2.0) as probe_client:
             resp = probe_client.get(f"{vllm_base_url}/models")
-            if resp.status_code == 200:
-                logger.info("vLLM server already running – skipping boot", url=vllm_base_url)
+            if _is_vllm_models_response_valid(resp):
+                logger.info(
+                    "vLLM server already running – skipping boot",
+                    url=vllm_base_url,
+                )
                 return
+            # Port is occupied but not by vLLM — this is a configuration error.
+            if resp.status_code == 200:
+                logger.error(
+                    "Port is occupied by a non-vLLM service "
+                    "(likely a RunPod/reverse-proxy placeholder)",
+                    port=VLLM_PORT,
+                    hint="Change VLLM_PORT to a free port (e.g. 8000, 8765, 7000) "
+                         "and restart the script.",
+                )
+                sys.exit(1)
     except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
         pass
 
@@ -262,7 +303,7 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         try:
             with httpx.Client(timeout=2.0) as poll_client:
                 poll_resp = poll_client.get(f"{vllm_base_url}/models")
-                if poll_resp.status_code == 200:
+                if _is_vllm_models_response_valid(poll_resp):
                     elapsed: float = time.monotonic() - boot_start_time
                     logger.info("vLLM server is up and ready", elapsed=f"{elapsed:.1f}s")
                     return
@@ -866,7 +907,7 @@ def main() -> None:
     write_batch_report(
         batch_report_path=batch_report_path,
         input_images_dir=input_dir,
-        batch_processing_results=batch_results,
+        results=batch_results,
         pipeline_elapsed_sec=pipeline_elapsed,
     )
 
