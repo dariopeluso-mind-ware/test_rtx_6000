@@ -107,22 +107,28 @@ LLAMA_SERVER_UBATCH_SIZE: int = 512            # Micro-batch size
 # --- Transcription API settings ---
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
 TRANSCRIPTION_MAX_RETRIES: int = 3
-TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 2048    # Food labels never exceed ~1500 tokens
+TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 256     # JSON output only: ~30-50 tokens
 
 # System prompt (cached in KV cache, reused for all images)
+# V3: JSON extraction instead of full OCR – extract only EAN, lotto, peso_netto
 TRANSCRIPTION_SYSTEM_PROMPT: str = (
-    "You are a precise OCR system. Read all the text in the image. "
-    "Output only the text directly. Do not explain or add comments."
+    "You are a food label data extraction system. "
+    "Extract from the image the following fields: EAN code (barcode number), "
+    "lot number (codice lotto/lotto/lotto n), net weight in kg (peso netto). "
+    "Return ONLY valid JSON with these exact keys: ean, lotto, peso_netto. "
+    "Use null for missing fields. Normalize weight to float kilograms."
 )
 
 # User prompt (image-specific, cannot be cached)
-TRANSCRIPTION_USER_PROMPT: str = "Transcribe the text in this image."
+TRANSCRIPTION_USER_PROMPT: str = (
+    "Extract: EAN code, lotto number, peso netto (kg). Output JSON only."
+)
 
 # --- EAN detection toggle ---
 # Set ENABLE_EAN_DETECTION=false to skip barcode search (saves ~5-10 ms per image)
-# Abilitare/disabilitare la ricerca barcode EAN (default: true)
-# Impostare a false per risparmiare ~5-10 ms per immagine
-ENABLE_EAN_DETECTION: bool = True
+# Abilitare/disabilitare la ricerca barcode EAN (default: False)
+# Impostare a false per risparmiare ~100-150 ms per immagine
+ENABLE_EAN_DETECTION: bool = False
 
 # --- Crop disk-write toggle ---
 # Set SAVE_CROPS=true to write cropped label JPEGs to disk (for debugging).
@@ -1145,7 +1151,7 @@ def main() -> None:
     # ----------------------------------------------------------------------------------------------
     # Directory setup
     # ----------------------------------------------------------------------------------------------
-    input_images_dir: Path = Path("test")
+    input_images_dir: Path = Path("etichette_esempio")
     output_root_dir: Path = Path("output_test")
     cropped_labels_dir: Path = output_root_dir / "crops"
     batch_report_path: Path = output_root_dir / "mocr_batch_results.md"
