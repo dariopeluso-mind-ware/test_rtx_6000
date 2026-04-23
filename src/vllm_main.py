@@ -279,10 +279,27 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
 
     VLLM_SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_file_handle = open(VLLM_SERVER_LOG_PATH, "w", encoding="utf-8")
+
+    # Costruire l'environment per il subprocess vLLM.
+    # In container RunPod NVML spesso non è accessibile dal subprocess figlio,
+    # causando "Failed to infer device type". Forzare VLLM_TARGET_DEVICE=cuda
+    # salta l'auto-detection e usa CUDA direttamente.
+    vllm_env = os.environ.copy()
+    vllm_env.update({
+        "VLLM_TARGET_DEVICE": "cuda",
+        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+        # NVIDIA container runtime — assicurare che il subprocess veda la GPU
+        "NVIDIA_VISIBLE_DEVICES": os.environ.get("NVIDIA_VISIBLE_DEVICES", "all"),
+        "NVIDIA_DRIVER_CAPABILITIES": os.environ.get(
+            "NVIDIA_DRIVER_CAPABILITIES", "compute,utility"
+        ),
+    })
+
     vllm_subprocess_handle = subprocess.Popen(
         command_line,
         stdout=log_file_handle,
         stderr=subprocess.STDOUT,
+        env=vllm_env,
     )
 
     logger.info(
