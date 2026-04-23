@@ -174,7 +174,7 @@ VLLM_ENABLE_MTP: bool = False
 VLLM_SERVER_LOG_PATH: Path = Path("output/vllm_server.log")
 VLLM_SERVER_SHUTDOWN_TIMEOUT_SEC: float = 15.0
 VLLM_SERVER_READY_POLL_SEC: float = 5.0
-VLLM_SERVER_BOOT_TIMEOUT_SEC: float = 600.0
+VLLM_SERVER_PROGRESS_LOG_INTERVAL_SEC: float = 30.0  # Intervallo log di stato durante il boot
 
 # ── Transcription API settings ───────────────────────────────────────────────────
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
@@ -379,24 +379,36 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         log_path=str(VLLM_SERVER_LOG_PATH),
     )
     boot_start_time: float = time.monotonic()
+    last_progress_log: float = boot_start_time
 
+    # Nessun timeout fisso: aspetta finché il server risponde o il processo muore.
+    # Il boot di vLLM su modelli grossi (35B FP8) può richiedere 10-15 min
+    # al primo avvio (download + compilazione Dynamo + CUDA graph warmup).
     while True:
         if vllm_subprocess_handle.poll() is not None:
             exit_code = vllm_subprocess_handle.poll()
+            # Mostra le ultime righe del log per diagnosi immediata
+            log_tail = ""
+            try:
+                log_tail = VLLM_SERVER_LOG_PATH.read_text(encoding="utf-8", errors="replace")
+                log_tail = "\n".join(log_tail.splitlines()[-30:])
+            except Exception:
+                pass
             logger.error(
                 "vLLM subprocess exited unexpectedly during boot",
                 exit_code=exit_code,
                 elapsed=f"{time.monotonic() - boot_start_time:.1f}s",
+                log_tail=log_tail,
             )
             sys.exit(1)
 
-        if time.monotonic() - boot_start_time > VLLM_SERVER_BOOT_TIMEOUT_SEC:
-            logger.error(
-                "vLLM server boot timed out",
-                timeout_sec=VLLM_SERVER_BOOT_TIMEOUT_SEC,
+        now = time.monotonic()
+        if now - last_progress_log >= VLLM_SERVER_PROGRESS_LOG_INTERVAL_SEC:
+            logger.info(
+                "Still waiting for vLLM server...",
+                elapsed=f"{now - boot_start_time:.0f}s",
             )
-            vllm_subprocess_handle.terminate()
-            sys.exit(1)
+            last_progress_log = now
 
         try:
             with httpx.Client(timeout=2.0) as poll_client:
