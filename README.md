@@ -600,18 +600,62 @@ tmux attach -t tosano
 tmux kill-session -t tosano
 ```
 
+### 10c. Invio immagini al Pod (via runpodctl)
+
+Poiché il proxy SSH di RunPod può bloccare `scp`/`rsync`, il metodo più affidabile è `runpodctl`:
+
+**Sul tuo PC locale:**
+1. Comprimi la cartella delle immagini:
+   ```bash
+   tar czf etichette.tar.gz -C /path/to/etichette_esempio .
+   ```
+2. Invia il file:
+   ```bash
+   runpodctl send etichette.tar.gz
+   ```
+   Copia il codice generato (es. `1234-word-word-7`).
+
+**Sul Pod:**
+1. Crea la cartella di destinazione:
+   ```bash
+   mkdir -p /workspace/test_rtx_6000/etichette_esempio
+   ```
+2. Ricevi e decomprimi:
+   ```bash
+   runpodctl receive <CODICE>
+   tar xzf etichette.tar.gz --no-same-owner -C /workspace/test_rtx_6000/etichette_esempio/
+   ```
+
 ---
 
 ## 11. Recupero dei risultati
 
+### 11a. Via runpodctl (Raccomandato)
+
+**Sul Pod:**
+1. Comprimi i risultati:
+   ```bash
+   tar czf output_results.tar.gz -C /workspace/test_rtx_6000 output_etichette_esempio
+   ```
+2. Invia:
+   ```bash
+   runpodctl send output_results.tar.gz
+   ```
+
+**Sul tuo PC locale:**
+1. Ricevi:
+   ```bash
+   runpodctl receive <CODICE>
+   tar xzf output_results.tar.gz
+   ```
+
+### 11b. Via rsync (Solo se SSH diretto è configurato)
+
 ```bash
 # Con rsync (dal laptop locale)
 rsync -avz --progress \
-    user@<cloud-host>:<path-to-project>/output_test/ \
+    user@<cloud-host>:<path-to-project>/output_etichette_esempio/ \
     ./output_cloud/
-
-# Solo il report riassuntivo
-rsync -avz user@<cloud-host>:<path-to-project>/output_test/mocr_batch_results.md ./output_cloud/
 ```
 
 ---
