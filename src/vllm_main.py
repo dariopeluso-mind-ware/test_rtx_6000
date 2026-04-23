@@ -76,7 +76,7 @@ VLLM_MODEL_REPO_ID: str = "Qwen/Qwen3.6-35B-A3B-FP8"
 
 # vLLM runtime settings (from official HF model card)
 VLLM_MAX_MODEL_LEN: int = 8192
-VLLM_GPU_MEMORY_UTILIZATION: float = 0.85
+VLLM_GPU_MEMORY_UTILIZATION: float = 0.9
 VLLM_MAX_NUM_SEQS: int = 8
 VLLM_REASONING_PARSER: str = "qwen3"          # Required for Qwen3.6
 VLLM_TENSOR_PARALLEL_SIZE: int = 1
@@ -107,9 +107,9 @@ TRANSCRIPTION_SYSTEM_PROMPT: str = (
 TRANSCRIPTION_USER_PROMPT: str = "Transcribe the text in this image."
 
 # ── Toggle env vars ───────────────────────────────────────────────────────────
-# Abilitare/disabilitare la ricerca barcode EAN (default: true)
-# Impostare a false per risparmiare ~5-10 ms per immagine
-ENABLE_EAN_DETECTION: bool = True
+# Abilitare/disabilitare la ricerca barcode EAN (default: False)
+# Impostare a false per risparmiare ~100-150 ms per immagine
+ENABLE_EAN_DETECTION: bool = False
 
 # Salvare i crop JPEG su disco (default: false — disattivato per velocizzare)
 # Impostare a true solo per debugging / ispezione visiva dei crop
