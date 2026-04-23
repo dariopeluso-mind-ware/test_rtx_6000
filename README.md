@@ -359,25 +359,9 @@ I parametri utilizzati in `full-gpu_main_v2.py` seguono le
 > **Nota**: Qwen3.6 **non supporta** `/think` e `/nothink`. Il thinking mode si
 > disabilita esclusivamente via `chat-template-kwargs`.
 
-### 8d. Configurazione (`.env`)
+### 8d. Configurazione (hardcoded in src/*.py)
 
-```bash
-cp .env.example .env
-```
-
-Contenuto di `.env`:
-
-```ini
-# Modello GGUF (default: UD-Q4_K_XL)
-QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
-
-# Quantizzazione più aggressiva — ~25% più veloce ma possibile degradazione OCR
-# Decommentare per test A/B (richiede download ~16.8 GB):
-# QWEN_GGUF_FILE=Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf
-
-# Abilitare/disabilitare ricerca EAN barcode (default: true)
-ENABLE_EAN_DETECTION=true
-```
+I parametri principali (modello, port, dimensione crop) sono configurati direttamente all'interno dei file sorgente nella cartella `src/`. Aprire gli script (come `src/full-gpu_main_v2.py`) e modificare le costanti ad inizio file se necessario (es: `ENABLE_EAN_DETECTION = True`).
 
 ### 8e. Esecuzione
 
@@ -446,28 +430,21 @@ Per pre-scaricare (consigliato):
 huggingface-cli download Qwen/Qwen3.6-35B-A3B-FP8
 ```
 
-### 9d. Configurazione (`.env`)
+### 9d. Configurazione (hardcoded in src/vllm_main.py)
 
-```bash
-# Aggiungere a .env (o creare .env con solo queste variabili)
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
-VLLM_PORT=8001
-VLLM_TENSOR_PARALLEL_SIZE=1
-```
+I parametri per vLLM sono hardcoded all'inizio dello script `src/vllm_main.py`. Aprire lo script e modificare le costanti per personalizzare il comportamento, per esempio:
 
-**.env completo per vLLM**:
+```python
+# ── vLLM server settings ───────────────────────────────────────────────────────
+VLLM_PORT: int = 8001
+VLLM_MODEL_REPO_ID: str = "Qwen/Qwen3.6-35B-A3B-FP8"
+VLLM_TENSOR_PARALLEL_SIZE: int = 1
 
-```ini
-# ── vLLM settings ──────────────────────────────
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
-VLLM_PORT=8001
-VLLM_TENSOR_PARALLEL_SIZE=1
-
-# ── Pipeline settings ─────────────────────────
-ENABLE_EAN_DETECTION=true
-SAVE_CROPS=false
-YOLO_IMG_SIZE=640
-CROP_MAX_DIMENSION=1280
+# ── Toggle settings ────────────────────────────────────────────────────────────
+ENABLE_EAN_DETECTION: bool = True
+SAVE_CROPS: bool = False
+YOLO_IMG_SIZE: int = 640
+CROP_MAX_DIMENSION: int = 1280
 ```
 
 ### 9e. Parametri di sampling (raccomandazioni ufficiali Qwen3.6)
@@ -499,10 +476,10 @@ tramite `--speculative-config`.
 | `method` | `qwen3_next_mtp` |
 | `num_speculative_tokens` | `2` |
 | Speedup stimato | ~20-30% sulla generazione token |
-| Attivazione | `VLLM_ENABLE_MTP=true` nel `.env` |
+| Attivazione | Modificare `VLLM_ENABLE_MTP = True` in `src/vllm_main.py` |
 
-MTP è **opt-in** (default: `false`) perché è una feature sperimentale.
-Se causa instabilità, disabilitare rimuovendo `VLLM_ENABLE_MTP=true` dal `.env`.
+MTP è **opt-in** (default: `False`) perché è una feature sperimentale.
+Se causa instabilità, disabilitare reimpostando `VLLM_ENABLE_MTP = False` in `src/vllm_main.py`.
 
 ### 9g. Comandi vLLM (dalla model card ufficiale)
 
@@ -673,12 +650,9 @@ pkill -9 -f vllm
 ### Errore: vLLM out of memory (OOM)
 
 **Causa**: Troppi modelli o KV cache in VRAM.
-**Soluzione**: Ridurre `--gpu-memory-utilization`:
+**Soluzione**: Ridurre `VLLM_GPU_MEMORY_UTILIZATION`:
 
-```bash
-# In .env:
-VLLM_GPU_MEMORY_UTILIZATION=0.80
-```
+Modificare `VLLM_GPU_MEMORY_UTILIZATION = 0.80` all'interno dello script `src/vllm_main.py`.
 
 ### Errore: vLLM non trova il modello
 
@@ -729,16 +703,9 @@ pip install --upgrade pip
 pip install -r requirements.txt
 pip install vllm>=0.19.0
 
-# 5. Crea .env per vLLM
-cat > .env << 'EOF'
-VLLM_MODEL_REPO_ID=Qwen/Qwen3.6-35B-A3B-FP8
-VLLM_PORT=8001
-VLLM_TENSOR_PARALLEL_SIZE=1
-ENABLE_EAN_DETECTION=true
-SAVE_CROPS=false
-YOLO_IMG_SIZE=640
-CROP_MAX_DIMENSION=1280
-EOF
+# 5. Configurazione
+# Le impostazioni (VLLM_MODEL_REPO_ID, ENABLE_EAN_DETECTION, ecc.) sono hardcoded direttamente in src/vllm_main.py
+# Modifica quel file se necessario prima di eseguire.
 
 # 6. Esegui il pipeline vLLM! (target < 1 s/immagine)
 tmux new -s tosano

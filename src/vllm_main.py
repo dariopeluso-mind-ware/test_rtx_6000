@@ -64,28 +64,22 @@ import numpy as np
 from PIL import Image as PILImage
 from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # ── vLLM server settings ───────────────────────────────────────────────────────
-VLLM_PORT: int = int(os.environ.get("VLLM_PORT", "8001"))
+# Porta del server vLLM (default: 8001, diversa da llama-server che usa 8080)
+VLLM_PORT: int = 8001
 VLLM_BASE_URL: str = f"http://localhost:{VLLM_PORT}/v1"
-VLLM_MODEL_REPO_ID: str = os.environ.get(
-    "VLLM_MODEL_REPO_ID",
-    # Qwen3.6-35B-A3B-FP8: official FP8 quant (~35 GB vs ~72 GB BF16, near-identical quality)
-    # Alternative BF16 (full precision): Qwen/Qwen3.6-35B-A3B
-    "Qwen/Qwen3.6-35B-A3B-FP8",
-)
+
+# Repo ID del modello Qwen3.6-35B-A3B su HuggingFace
+# FP8 raccomandato per vLLM: ~35 GB vs ~72 GB BF16, qualità quasi identica, ~1.5-2x più veloce
+# Alternativa BF16 (full precision): Qwen/Qwen3.6-35B-A3B
+VLLM_MODEL_REPO_ID: str = "Qwen/Qwen3.6-35B-A3B-FP8"
 
 # vLLM runtime settings (from official HF model card)
 VLLM_MAX_MODEL_LEN: int = 8192
 VLLM_GPU_MEMORY_UTILIZATION: float = 0.85
 VLLM_MAX_NUM_SEQS: int = 8
 VLLM_REASONING_PARSER: str = "qwen3"          # Required for Qwen3.6
-VLLM_TENSOR_PARALLEL_SIZE: int = int(
-    os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "1")
-)
+VLLM_TENSOR_PARALLEL_SIZE: int = 1
 # Note: Qwen3.6-35B-A3B-FP8 is the official FP8 quantization (~35 GB vs ~72 GB BF16).
 # Fine-grained FP8 with block size 128 — quality "nearly identical" (official Qwen).
 # On Blackwell (sm_120) FP8 tensor cores give ~2× throughput vs BF16.
@@ -93,7 +87,7 @@ VLLM_TENSOR_PARALLEL_SIZE: int = int(
 # Multi-Token Prediction (speculative decoding nativo Qwen3.6)
 # Potenziale ~20-30% speedup sulla generazione token.
 # Sperimentale — disabilitare se causa instabilità.
-VLLM_ENABLE_MTP: bool = os.environ.get("VLLM_ENABLE_MTP", "false").lower() == "true"
+VLLM_ENABLE_MTP: bool = False
 
 # ── vLLM server lifecycle ────────────────────────────────────────────────────
 VLLM_SERVER_LOG_PATH: Path = Path("output/vllm_server.log")
@@ -113,16 +107,20 @@ TRANSCRIPTION_SYSTEM_PROMPT: str = (
 TRANSCRIPTION_USER_PROMPT: str = "Transcribe the text in this image."
 
 # ── Toggle env vars ───────────────────────────────────────────────────────────
-ENABLE_EAN_DETECTION: bool = (
-    os.environ.get("ENABLE_EAN_DETECTION", "true").lower() == "true"
-)
-SAVE_CROPS: bool = (
-    os.environ.get("SAVE_CROPS", "false").lower() == "true"
-)
+# Abilitare/disabilitare la ricerca barcode EAN (default: true)
+# Impostare a false per risparmiare ~5-10 ms per immagine
+ENABLE_EAN_DETECTION: bool = True
+
+# Salvare i crop JPEG su disco (default: false — disattivato per velocizzare)
+# Impostare a true solo per debugging / ispezione visiva dei crop
+SAVE_CROPS: bool = False
 
 # ── Image preprocessing settings ────────────────────────────────────────────────
 PYZBAR_MAX_DIMENSION: int = 1500
-CROP_MAX_DIMENSION: int = int(os.environ.get("CROP_MAX_DIMENSION", "1280"))
+
+# Dimensione massima del crop prima del base64 encoding (default: 1280)
+# Ridurre per immagini molto grandi (es. 800) = meno base64 = prefill più veloce
+CROP_MAX_DIMENSION: int = 1280
 CROP_JPEG_QUALITY: int = 90
 
 # ── Barcode decoding settings ─────────────────────────────────────────────────
@@ -137,7 +135,9 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # ── YOLO model paths ───────────────────────────────────────────────────────────
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
-YOLO_IMG_SIZE: int = int(os.environ.get("YOLO_IMG_SIZE", "640"))
+
+# Dimensione input YOLO OBB (deve corrispondere alla export del TensorRT engine)
+YOLO_IMG_SIZE: int = 640
 
 # ── Global state ───────────────────────────────────────────────────────────────
 vllm_subprocess_handle: subprocess.Popen | None = None

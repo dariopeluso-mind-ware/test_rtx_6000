@@ -35,13 +35,21 @@ import cv2                                     # OpenCV – used for affine desk
 from PIL import Image as PILImage              # Pillow – used by pyzbar for barcode decoding
 from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
-from dotenv import load_dotenv
+# --------------------------------------------------------------------------------------------------
+# Abilitare/disabilitare la ricerca barcode EAN (default: true)
+# Impostare a false per risparmiare ~5-10 ms per immagine
+ENABLE_EAN_DETECTION: bool = True
 
-# --------------------------------------------------------------------------------------------------
-# Load .env file (if present) — must happen before any os.environ.get() calls below.
-# Variables set via shell export take precedence over .env values.
-# --------------------------------------------------------------------------------------------------
-load_dotenv()
+# Salvare i crop JPEG su disco (default: false — disattivato per velocizzare)
+# Impostare a true solo per debugging / ispezione visiva dei crop
+SAVE_CROPS: bool = False
+
+# Dimensione input YOLO OBB (deve corrispondere alla export del TensorRT engine)
+YOLO_IMG_SIZE: int = 640
+
+# Dimensione massima del crop prima del base64 encoding (default: 1280)
+# Ridurre per immagini molto grandi (es. 800) = meno base64 = prefill più veloce
+CROP_MAX_DIMENSION: int = 1280
 
 # --------------------------------------------------------------------------------------------------
 # Module-level constants

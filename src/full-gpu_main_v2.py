@@ -69,13 +69,7 @@ import numpy as np                             # NumPy – used for YOLO warmup 
 from PIL import Image as PILImage              # Pillow – used by pyzbar for barcode decoding
 from pyzbar.pyzbar import decode as decode_barcodes
 from ultralytics import YOLO
-from dotenv import load_dotenv
-
 # --------------------------------------------------------------------------------------------------
-# Load .env file (if present) — must happen before any os.environ.get() calls below.
-# Variables set via shell export take precedence over .env values.
-# --------------------------------------------------------------------------------------------------
-load_dotenv()
 
 # --------------------------------------------------------------------------------------------------
 # Module-level constants
@@ -93,10 +87,9 @@ QWEN_GGUF_REPO_ID: str = "unsloth/Qwen3.6-35B-A3B-GGUF"
 #   Q4_K_M      (~20 GB)   — standard, velocità baseline
 # Entrambi hanno ~4 bit per peso → stessa velocità di decode (memory-bandwidth-bound).
 # La differenza è nella qualità: UD-Q4_K_XL ha layout layer ottimizzato per preservare accuratezza.
-QWEN_GGUF_WEIGHTS_FILENAME: str = os.environ.get(
-    "QWEN_GGUF_FILE",
-    "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
-)
+# Modello GGUF da usare (default: UD-Q4_K_XL — Unsloth Dynamic 2.0, raccomandato)
+# Alternativa: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+QWEN_GGUF_WEIGHTS_FILENAME: str = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 QWEN_VISION_PROJECTOR_FILENAME: str = "mmproj-F16.gguf"
 QWEN_MODEL_API_NAME: str = "Qwen3.6"          # Value used in the chat-completion "model" field
 
@@ -127,14 +120,16 @@ TRANSCRIPTION_USER_PROMPT: str = "Transcribe the text in this image."
 
 # --- EAN detection toggle ---
 # Set ENABLE_EAN_DETECTION=false to skip barcode search (saves ~5-10 ms per image)
-ENABLE_EAN_DETECTION: bool = os.environ.get(
-    "ENABLE_EAN_DETECTION", "true"
-).lower() == "true"
+# Abilitare/disabilitare la ricerca barcode EAN (default: true)
+# Impostare a false per risparmiare ~5-10 ms per immagine
+ENABLE_EAN_DETECTION: bool = True
 
 # --- Crop disk-write toggle ---
 # Set SAVE_CROPS=true to write cropped label JPEGs to disk (for debugging).
 # Default false: skip disk I/O in production hot path, only base64 encode in memory.
-SAVE_CROPS: bool = os.environ.get("SAVE_CROPS", "false").lower() == "true"
+# Salvare i crop JPEG su disco (default: false — disattivato per velocizzare)
+# Impostare a true solo per debugging / ispezione visiva dei crop
+SAVE_CROPS: bool = False
 
 # --- Image preprocessing settings ---
 # Downscale barcode images to this max dimension before pyzbar scan.
@@ -143,7 +138,9 @@ PYZBAR_MAX_DIMENSION: int = 1500
 
 # Resize crop to this max dimension before base64 encoding.
 # Smaller images = less base64 data = faster prefill in llama-server.
-CROP_MAX_DIMENSION: int = int(os.environ.get("CROP_MAX_DIMENSION", "1280"))
+# Dimensione massima del crop prima del base64 encoding (default: 1280)
+# Ridurre per immagini molto grandi (es. 800) = meno base64 = prefill più veloce
+CROP_MAX_DIMENSION: int = 1280
 
 # JPEG quality for in-memory encoding (0-100, higher = larger file + more quality)
 CROP_JPEG_QUALITY: int = 90
@@ -169,9 +166,8 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
 # --- YOLO model paths ---
 YOLO_MODEL_PT_PATH: Path = Path("best.pt")
 YOLO_TENSORRT_PATH: Path = Path("best.engine")
-YOLO_IMG_SIZE: int = int(os.environ.get(      # Must match TensorRT engine export size
-    "YOLO_IMG_SIZE", "640"
-))
+# Dimensione input YOLO OBB (deve corrispondere alla export del TensorRT engine)
+YOLO_IMG_SIZE: int = 640
 
 # --------------------------------------------------------------------------------------------------
 # Global state – shared across function calls without passing as arguments.
