@@ -322,16 +322,10 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         tp_size=VLLM_TENSOR_PARALLEL_SIZE,
     )
 
-    # Wrapper script che forza la piattaforma CUDA prima dell'import di vLLM.
-    # Necessario perché in container RunPod NVML (libnvidia-ml.so) non è accessibile,
-    # e l'auto-detection di vLLM (pynvml.nvmlInit()) fallisce DURANTE il parsing
-    # degli argomenti CLI — prima che --device cuda possa essere letto.
-    # Il wrapper usa NonNvmlCudaPlatform (basato su torch.cuda.*) come fallback.
-    wrapper_script: Path = Path(__file__).parent / "vllm_server_wrapper.py"
-
+    # vLLM command (from official HF model card: https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
     command_line: list[str] = [
         sys.executable,
-        str(wrapper_script),
+        "-m", "vllm.entrypoints.openai.api_server",
         "--model", VLLM_MODEL_REPO_ID,
         "--port", str(VLLM_PORT),
         "--tensor-parallel-size", str(VLLM_TENSOR_PARALLEL_SIZE),
