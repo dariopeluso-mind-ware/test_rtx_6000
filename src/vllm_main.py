@@ -41,6 +41,15 @@ Environment Variables:
 """
 
 import time as _time_module
+
+# ── GPU visibility ─────────────────────────────────────────────────────────────
+# Must be set BEFORE importing torch / ultralytics / vllm.
+# Otherwise worker subprocesses spawned by ultralytics won't inherit the setting
+# and will see torch.cuda.is_available()=False while vLLM already owns the GPU.
+import os
+if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 _IMPORT_START_MONOTONIC: float = _time_module.perf_counter()
 print(
     "\n⏳ Initialising runtime (PyTorch + CUDA + TensorRT)… "
