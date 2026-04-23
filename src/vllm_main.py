@@ -47,8 +47,80 @@ import time as _time_module
 # Otherwise worker subprocesses spawned by ultralytics won't inherit the setting
 # and will see torch.cuda.is_available()=False while vLLM already owns the GPU.
 import os
+import sys
 if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+# ── Early PyTorch CUDA check ───────────────────────────────────────────────────
+# vLLM richiede torch compilato con CUDA E un driver NVIDIA funzionante.
+# YOLO TensorRT e llama-server usano il runtime CUDA direttamente (senza
+# PyTorch), quindi possono funzionare anche con torch CPU-only. Ma vLLM no.
+#
+# Due casi di errore distinti:
+#   1. torch CPU-only: is_available()=False → serve pip install torch con CUDA
+#   2. Driver NVIDIA rotto: is_available()=True ma cuda_init() fallisce
+#      (tipico di RunPod quando il pod perde accesso alla GPU)
+import torch
+
+_torch_ver = torch.__version__
+_cuda_compiled = getattr(torch.version, "cuda", None)
+
+if not torch.cuda.is_available():
+    # Caso 1: PyTorch compilato senza CUDA
+    print(
+        "\n" + "=" * 80 + "\n"
+        "ERRORE FATALE: PyTorch NON ha supporto CUDA!\n"
+        "\n"
+        f"  torch.__version__    = {_torch_ver}\n"
+        f"  torch.version.cuda   = {_cuda_compiled}\n"
+        f"  torch.cuda.is_available() = False\n"
+        "\n"
+        "vLLM richiede PyTorch compilato con CUDA.\n"
+        "YOLO TensorRT e llama-server (full-gpu_main_v2.py) funzionano\n"
+        "perché usano il runtime CUDA direttamente, senza PyTorch.\n"
+        "\n"
+        "FIX — reinstalla PyTorch con CUDA nel tuo virtualenv:\n"
+        "\n"
+        "  pip uninstall -y torch torchvision torchaudio\n"
+        "  pip install torch torchvision torchaudio --index-url "
+        "https://download.pytorch.org/whl/cu124\n"
+        "\n"
+        "(Adatta cu124 alla tua versione CUDA — controlla con nvidia-smi)\n"
+        + "=" * 80 + "\n"
+    )
+    sys.exit(1)
+
+# Caso 2: torch ha CUDA compilato, ma il driver/GPU non è accessibile.
+# torch.cuda.is_available() controlla solo se CUDA è compilato +
+# se libcuda.so esiste. NON verifica che il driver funzioni davvero.
+# Su RunPod il pod può perdere accesso alla GPU → nvidia-smi fallisce.
+try:
+    torch.cuda.init()
+    _gpu_name = torch.cuda.get_device_name(0)
+except RuntimeError as _cuda_err:
+    print(
+        "\n" + "=" * 80 + "\n"
+        "ERRORE FATALE: GPU NVIDIA non accessibile!\n"
+        "\n"
+        f"  torch.__version__    = {_torch_ver}\n"
+        f"  torch.version.cuda   = {_cuda_compiled}\n"
+        f"  torch.cuda.is_available() = True  (CUDA è compilato in torch)\n"
+        f"  torch.cuda.init()    = FALLITO: {_cuda_err}\n"
+        "\n"
+        "PyTorch ha supporto CUDA ma il driver NVIDIA non risponde.\n"
+        "Questo è tipico di RunPod quando il pod perde accesso alla GPU.\n"
+        "\n"
+        "FIX — dal pannello RunPod:\n"
+        "\n"
+        "  1. Stop Pod\n"
+        "  2. Start Pod\n"
+        "  3. Verifica: nvidia-smi  (deve mostrare la GPU)\n"
+        "  4. Rilancia: python3 src/vllm_main.py\n"
+        "\n"
+        "Se il problema persiste, crea un nuovo pod.\n"
+        + "=" * 80 + "\n"
+    )
+    sys.exit(1)
 
 _IMPORT_START_MONOTONIC: float = _time_module.perf_counter()
 print(
@@ -295,6 +367,10 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         "NVIDIA_DRIVER_CAPABILITIES": os.environ.get(
             "NVIDIA_DRIVER_CAPABILITIES", "compute,utility"
         ),
+        # RunPod: evita "Cannot re-initialize CUDA in forked subprocess".
+        # vLLM spawna worker processes — con fork() ereditano lo stato CUDA
+        # corrotto dal parent. spawn() crea processi puliti.
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     })
 
     vllm_subprocess_handle = subprocess.Popen(
