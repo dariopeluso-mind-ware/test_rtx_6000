@@ -157,10 +157,11 @@ VLLM_MODEL_REPO_ID: str = "Qwen/Qwen3.6-35B-A3B-FP8"
 
 # vLLM runtime settings (from official HF model card)
 VLLM_MAX_MODEL_LEN: int = 8192
-VLLM_GPU_MEMORY_UTILIZATION: float = 0.85
-VLLM_MAX_NUM_SEQS: int = 8
+VLLM_GPU_MEMORY_UTILIZATION: float = 0.92   # 96 GB GPU, ~34 GB model → ampio margine per KV cache + YOLO (~100 MB)
+VLLM_MAX_NUM_SEQS: int = 32                  # Più sequenze concorrenti per throughput batch
 VLLM_REASONING_PARSER: str = "qwen3"          # Required for Qwen3.6
 VLLM_TENSOR_PARALLEL_SIZE: int = 1
+VLLM_KV_CACHE_DTYPE: str = "fp8"              # Dimezza la memoria KV cache, nativo su Blackwell FP8
 # Note: Qwen3.6-35B-A3B-FP8 is the official FP8 quantization (~35 GB vs ~72 GB BF16).
 # Fine-grained FP8 with block size 128 — quality "nearly identical" (official Qwen).
 # On Blackwell (sm_120) FP8 tensor cores give ~2× throughput vs BF16.
@@ -179,7 +180,7 @@ VLLM_SERVER_PROGRESS_LOG_INTERVAL_SEC: float = 30.0  # Intervallo log di stato d
 # ── Transcription API settings ───────────────────────────────────────────────────
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
 TRANSCRIPTION_MAX_RETRIES: int = 3
-TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 2048
+TRANSCRIPTION_MAX_OUTPUT_TOKENS: int = 1024  # Testo etichette tipicamente <500 token
 
 TRANSCRIPTION_SYSTEM_PROMPT: str = (
     "You are a precise OCR system. Read all the text in the image. "
@@ -335,6 +336,7 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         "--enable-chunked-prefill",
         "--enable-prefix-caching",
         "--reasoning-parser", VLLM_REASONING_PARSER,
+        "--kv-cache-dtype", VLLM_KV_CACHE_DTYPE,
     ]
 
     # MTP: Multi-Token Prediction — speculative decoding nativo di Qwen3.6.
@@ -365,6 +367,9 @@ def ensure_vllm_server_running(vllm_base_url: str) -> None:
         # vLLM spawna worker processes — con fork() ereditano lo stato CUDA
         # corrotto dal parent. spawn() crea processi puliti.
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        # FlashInfer MoE backend — raccomandato per Blackwell (sm_120) al posto di TRITON.
+        # FlashInfer ha kernel FP8 ottimizzati per le architetture più recenti.
+        "VLLM_USE_FLASHINFER_MOE_FP8": "1",
     })
 
     vllm_subprocess_handle = subprocess.Popen(
@@ -941,7 +946,7 @@ def main() -> None:
     ensure_vllm_server_running(VLLM_BASE_URL)
     logger.info("[Step 2/3] vLLM server ready ✓", url=VLLM_BASE_URL)
 
-    # Warmup YOLO TensorRT kernels
+    # Warmup — YOLO TensorRT kernels
     logger.info(f"[Warmup] Running YOLO TensorRT warmup pass ({YOLO_IMG_SIZE}×{YOLO_IMG_SIZE})…")
     t_warmup = time.perf_counter()
     try:
@@ -953,6 +958,58 @@ def main() -> None:
             "[Warmup] YOLO warmup failed (non-fatal)",
             error=str(exc),
         )
+
+    # Warmup — vLLM vision encoder JIT compilation
+    # La prima richiesta con immagine innesca la compilazione JIT dei kernel
+    # del vision encoder (ViT). Mandiamo un'immagine dummy per "scaldare" il server
+    # prima di processare le immagini reali.
+    logger.info("[Warmup] Sending synthetic vision warmup request to vLLM...")
+    try:
+        # Immagine dummy 64×64 grigia — dimensione minima per triggerare il vision encoder
+        warmup_img = np.full((64, 64, 3), 128, dtype=np.uint8)
+        ok, warmup_buf = cv2.imencode(".jpg", warmup_img, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        if ok:
+            warmup_b64 = base64.b64encode(warmup_buf).decode("utf-8")
+            warmup_payload: dict = {
+                "model": VLLM_MODEL_REPO_ID,
+                "messages": [
+                    {"role": "system", "content": TRANSCRIPTION_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe."},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{warmup_b64}"},
+                            },
+                        ],
+                    },
+                ],
+                "max_tokens": 16,  # Output minimo — ci interessa solo il warmup
+                "temperature": 0.0,
+                "extra_body": {
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            }
+            warmup_client = _get_http_client()
+            warmup_resp = warmup_client.post(
+                f"{VLLM_BASE_URL}/chat/completions", json=warmup_payload
+            )
+            warmup_resp.raise_for_status()
+            warmup_data = warmup_resp.json()
+            warmup_tokens = warmup_data.get("usage", {}).get("completion_tokens", "?")
+            logger.info(
+                "[Warmup] vLLM vision warmup completed ✓",
+                completion_tokens=warmup_tokens,
+            )
+        else:
+            logger.warning("[Warmup] Failed to encode warmup image (non-fatal)")
+    except Exception as exc:
+        logger.warning(
+            "[Warmup] vLLM vision warmup failed (non-fatal)",
+            error=str(exc),
+        )
+
     logger.info(
         "[Warmup] All models warm and ready ✓",
         elapsed=f"{time.perf_counter() - t_warmup:.1f}s",
