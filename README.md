@@ -9,7 +9,9 @@ Questo progetto offre **due backend OCR** alternativi, entrambi compatibili con 
 
 | Backend | Script | VRAM | Velocità | Note |
 | ---------- | -------- | ------ | ---------- | ------ |
-| llama.cpp V2 | `src/full-gpu_main_v2.py` | 96 GB | ~1.0–1.5 s/img | **Raccomandato** — anti-loop, prefetch, KV q8 |
+| llama.cpp V3 | `src/llama_ean_lotto_peso.py` | 96 GB | **~0.3–0.5 s/img** | ⭐ JSON (EAN/lotto/peso) — V3 ottimizzato |
+| llama.cpp V3 | `src/llama_etichetta_completa.py` | 96 GB | **~0.7–1.2 s/img** | ⭐ Full OCR — V3 ottimizzato |
+| llama.cpp V2 | `src/full-gpu_main_v2.py` | 96 GB | ~1.0–1.5 s/img | anti-loop, prefetch, KV q8 |
 | llama.cpp V1 | `src/full-gpu_main.py` | 96 GB | ~1.3–2.0 s/img | Baseline (mantenuto per confronto) |
 | **vLLM** | `src/vllm_main.py` | 96 GB | **< 1 s/img** | Target principale |
 
@@ -184,9 +186,11 @@ Struttura dei file dopo il clone:
 ├── best.engine            # YOLO TensorRT FP16 (generato al primo avvio)
 ├── src/
 │   ├── main.py               # Script dev (8 GB VRAM, --cpu-moe, ONNX CPU)
+│   ├── llama_ean_lotto_peso.py   # Script V3 — JSON (EAN/lotto/peso) ⭐
+│   ├── llama_etichetta_completa.py # Script V3 — Full OCR ⭐
 │   ├── full-gpu_main.py      # Script llama.cpp V1 (baseline)
-│   ├── full-gpu_main_v2.py   # Script llama.cpp V2 (ottimizzato — raccomandato) ⭐
-│   └── vllm_main.py          # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img) ⭐
+│   ├── full-gpu_main_v2.py   # Script llama.cpp V2 (ottimizzato)
+│   └── vllm_main.py          # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img)
 ├── test/                      # Immagini di input per batch processing
 ├── llama.cpp/                 # Solo per full-gpu_main*.py (clonato separatamente)
 ├── requirements.txt       # Dipendenze Python
@@ -307,19 +311,25 @@ hf download \
 
 Con 96 GB VRAM, usare `src/full-gpu_main_v2.py` (raccomandato) al posto di `src/main.py`.
 
-### 8a. V1 vs V2
+### 8a. V1 vs V2 vs V3
 
-| Feature | `full-gpu_main.py` (V1) | `full-gpu_main_v2.py` (V2 — raccomandato) |
-| --------- | ------------------------- | -------------------------------------------- |
-| Sliding Window Attention | Standard | `--swa-full` (fix repetition loop) |
-| KV cache | FP16 | `q8_0` (~50% VRAM savings) |
-| Context size | 16384 | 4096 (basato su analisi P99=3008 token) |
-| Anti-ripetizione | Nessuna | `presence_penalty=1.5` (raccomandazione ufficiale Qwen3.6) |
-| Image loading | Sincrono | Async prefetch (ThreadPoolExecutor, 2 ahead) |
-| Crop warpAffine | Full resolution | Downscale a 2048px prima di warpAffine |
-| Velocità stimata | ~1.3–2.0 s/img | **~1.0–1.5 s/img** |
+| Feature | V1 (`full-gpu_main.py`) | V2 (`full-gpu_main_v2.py`) | V3 (`llama_ean_lotto_peso.py` / `llama_etichetta_completa.py`) |
+| --------- | ------------------------- | -------------------------------------------- | -------------------------------------------- |
+| Sliding Window Attention | Standard | `--swa-full` | `--swa-full` |
+| KV cache | FP16 | `q8_0` | `q8_0` |
+| Context size | 16384 | 4096 | 4096 / 16384 |
+| Anti-ripetizione | Nessuna | `presence_penalty=1.5` | Greedy (temperature=0, top_k=1) |
+| Image loading | Sincrono | Async prefetch | Async prefetch |
+| Crop warpAffine | Full resolution | Downscale 2048px (CPU) | **GPU (cv2.cuda) con fallback CPU** |
+| Vision token budget | Illimitato (~2000-2500) | Illimitato (~2000-2500) | **`--image-max-tokens 1024`** |
+| Crop max dimension | 1280px | 1280px | **800px** |
+| Batch/ubatch size | 2048/512 | 2048/512 | **4096/4096** |
+| JPEG quality | 90 | 90 | **75** |
+| Velocità stimata | ~1.3–2.0 s/img | ~1.0–1.5 s/img | **~0.3–1.2 s/img** |
 
 V2 risolve il **bug di ripetizione infinita** osservato nell'analisi batch (image #18: 12.2s, 117 righe ripetute).
+
+V3 aggiunge **5 ottimizzazioni Tier 1** focalizzate sul prefill (95.7% del tempo totale).
 
 ### 8b. Ottimizzazioni applicate
 
@@ -344,6 +354,16 @@ V2 risolve il **bug di ripetizione infinita** osservato nell'analisi batch (imag
 | Context 16384→4096 | Meno VRAM, marginale speedup |
 | Async image prefetch | Elimina cold-cache I/O RunPod (load 5s → ~0ms) |
 | Downscale pre-warpAffine | Crop time ~50ms → ~15ms |
+
+**V3** (applicate in `llama_ean_lotto_peso.py` e `llama_etichetta_completa.py`):
+
+| Ottimizzazione | Impatto stimato | Dettagli |
+| --------------- | ---------------- | -------- |
+| `--image-max-tokens 1024` | **30-50% prefill** | Riduce i vision token da ~2000-2500 a 1024 (tunable fino a 560) |
+| `CROP_MAX_DIMENSION` 1280→800 | **15-25% prefill** | Meno pixel = meno token per il vision encoder |
+| `batch/ubatch` 2048/512→4096/4096 | **10-20% prefill** | Chunks più grandi per la GPU, sfrutta 96 GB VRAM |
+| `CROP_JPEG_QUALITY` 90→75 | **~5%** | Payload base64 30-40% più piccoli, qualità OCR invariata |
+| GPU crop (`cv2.cuda.warpAffine`) | **~70ms/img** | Upload→resize→warpAffine in VRAM, fallback CPU automatico |
 
 ### 8c. Parametri di sampling (raccomandazioni ufficiali Qwen3.6)
 
