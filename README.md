@@ -168,7 +168,7 @@ git clone https://github.com/<org>/<repo>.git
 cd <repo>
 ```
 
-Clonare llama.cpp all'interno del progetto (solo per `full-gpu_main.py`; NON necessario per `vllm_main.py`):
+Clonare llama.cpp all'interno del progetto (necessario per gli script `llama_*.py` e `full-gpu_main*.py`; NON necessario per `vllm_main.py`):
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git
@@ -192,7 +192,7 @@ Struttura dei file dopo il clone:
 │   ├── full-gpu_main_v2.py   # Script llama.cpp V2 (ottimizzato)
 │   └── vllm_main.py          # Script vLLM (96 GB VRAM, PagedAttention, < 1 s/img)
 ├── test/                      # Immagini di input per batch processing
-├── llama.cpp/                 # Solo per full-gpu_main*.py (clonato separatamente)
+├── llama.cpp/                 # Solo per llama_*.py e full-gpu_main*.py (clonato separatamente)
 ├── requirements.txt       # Dipendenze Python
 └── output/                # Output processing (generato)
 ```
@@ -228,7 +228,7 @@ pip install \
     opencv-python-headless>=4.10.0 \
     numpy>=1.24.0
 
-# Per full-gpu_main.py (llama.cpp): pip install onnxruntime-gpu>=1.23.0
+# Per llama_*.py / full-gpu_main*.py (llama.cpp): pip install onnxruntime-gpu>=1.23.0
 # Per vllm_main.py: pip install vllm>=0.19.0
 ```
 
@@ -247,7 +247,7 @@ python -c "import ultralytics; import httpx; import pyzbar; import PIL; import s
 
 ## 6. Build di llama.cpp con CUDA
 
-*(Solo per `full-gpu_main*.py`; NON necessario per `vllm_main.py`)*
+*(Solo per `llama_*.py` e `full-gpu_main*.py`; NON necessario per `vllm_main.py`)*
 
 ### 6a. Configurazione CMake
 
@@ -284,7 +284,7 @@ ls -lh llama-server
 
 ## 7. Pre-download dei pesi GGUF
 
-*(Solo per `full-gpu_main*.py`)*
+*(Solo per `llama_*.py` e `full-gpu_main*.py`)*
 
 I pesi vengono scaricati automaticamente alla prima esecuzione tramite `huggingface_hub`.
 Il modello `unsloth/Qwen3.6-35B-A3B-GGUF` è **pubblico** — non serve login né token HuggingFace.
@@ -309,7 +309,7 @@ hf download \
 
 ## 8. Esecuzione Full-GPU llama.cpp (96 GB VRAM)
 
-Con 96 GB VRAM, usare `src/full-gpu_main_v2.py` (raccomandato) al posto di `src/main.py`.
+Con 96 GB VRAM, usare gli script V3 (`src/llama_ean_lotto_peso.py` o `src/llama_etichetta_completa.py`).
 
 ### 8a. V1 vs V2 vs V3
 
@@ -367,7 +367,7 @@ V3 aggiunge **5 ottimizzazioni Tier 1** focalizzate sul prefill (95.7% del tempo
 
 ### 8c. Parametri di sampling (raccomandazioni ufficiali Qwen3.6)
 
-I parametri utilizzati in `full-gpu_main_v2.py` seguono le
+I parametri utilizzati negli script V3 seguono le
 [raccomandazioni ufficiali del model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8#best-practices).
 
 | Parametro | Valore | Motivazione |
@@ -381,13 +381,18 @@ I parametri utilizzati in `full-gpu_main_v2.py` seguono le
 
 ### 8d. Configurazione (hardcoded in src/*.py)
 
-I parametri principali (modello, port, dimensione crop) sono configurati direttamente all'interno dei file sorgente nella cartella `src/`. Aprire gli script (come `src/full-gpu_main_v2.py`) e modificare le costanti ad inizio file se necessario (es: `ENABLE_EAN_DETECTION = True`).
+I parametri principali (modello, port, dimensione crop) sono configurati direttamente all'interno dei file sorgente nella cartella `src/`. Aprire gli script V3 (`src/llama_ean_lotto_peso.py` o `src/llama_etichetta_completa.py`) e modificare le costanti ad inizio file se necessario (es: `ENABLE_EAN_DETECTION = True`).
 
 ### 8e. Esecuzione
 
 ```bash
 source .venv/bin/activate
-python3 src/full-gpu_main_v2.py
+
+# JSON extraction (EAN, lotto, peso netto) — ~0.3–0.5 s/img
+python3 src/llama_ean_lotto_peso.py
+
+# Full OCR (trascrizione completa etichetta) — ~0.7–1.2 s/img
+python3 src/llama_etichetta_completa.py
 ```
 
 **Nota**: `llama-server` viene avviato automaticamente se non è già in ascolto su port 8080.
@@ -606,10 +611,12 @@ Il report `mocr_batch_results.md` include una sezione **Timing Summary** con avg
 tmux new -s tosano
 source .venv/bin/activate
 
-# Eseguire lo script del backend scelto (cfr. sezioni 8d o 9f)
+# Eseguire lo script del backend scelto (cfr. sezioni 8e o 9h)
 python3 src/vllm_main.py
-# oppure
-python3 src/full-gpu_main_v2.py
+# oppure (llama.cpp V3)
+python3 src/llama_ean_lotto_peso.py
+# oppure (llama.cpp V3 — full OCR)
+python3 src/llama_etichetta_completa.py
 ```
 
 Staccare e riattaccare:
@@ -768,8 +775,8 @@ pip install -r requirements.txt
 pip install vllm>=0.19.0
 
 # 5. Configurazione
-# Le impostazioni (VLLM_MODEL_REPO_ID, ENABLE_EAN_DETECTION, ecc.) sono hardcoded direttamente in src/vllm_main.py
-# Modifica quel file se necessario prima di eseguire.
+# Le impostazioni sono hardcoded direttamente negli script src/*.py
+# Modifica il file desiderato se necessario prima di eseguire.
 
 # 6. Esegui il pipeline vLLM! (target < 1 s/immagine)
 tmux new -s tosano
@@ -779,6 +786,50 @@ python3 src/vllm_main.py
 
 ---
 
+## Checklist di deploy rapido (llama.cpp V3)
+
+```bash
+# === SUL SERVER CLOUD (RTX 6000 PRO Blackwell, 96 GB) ===
+
+# 1. Pacchetti di sistema (cfr. Sezione 2)
+sudo apt update && sudo apt install -y build-essential cmake git curl wget tmux \
+    python3-venv python3-pip libzbar0 libgl1 ca-certificates pkg-config
+
+# 2. CUDA Toolkit 13.0 (cfr. Sezione 3)
+# ... (come sopra)
+
+# 3. Clone del progetto + llama.cpp
+git clone https://github.com/<org>/<repo>.git && cd <repo>
+git clone https://github.com/ggml-org/llama.cpp.git
+
+# 4. Build llama.cpp (cfr. Sezione 6)
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j$(nproc) --target llama-server
+cp build/bin/llama-server .
+cd ..
+
+# 5. Python environment
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 6. Configurazione
+# Le impostazioni sono hardcoded ad inizio file in src/llama_ean_lotto_peso.py
+# e src/llama_etichetta_completa.py. Modificare le costanti se necessario.
+
+# 7. Esegui! (V3 ottimizzato — ~0.3–1.2 s/immagine)
+tmux new -s tosano
+source .venv/bin/activate
+# JSON extraction (EAN, lotto, peso netto)
+python3 src/llama_ean_lotto_peso.py
+# oppure: Full OCR (trascrizione completa etichetta)
+python3 src/llama_etichetta_completa.py
+```
+
+---
+
 *Documento generato per il deployment su RTX 6000 PRO Blackwell (sm_120, 96 GB VRAM).*
 *Modello vLLM: `Qwen/Qwen3.6-35B-A3B-FP8` — vLLM >= 0.19.0 — [HuggingFace model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)*
 *Modello llama.cpp: `unsloth/Qwen3.6-35B-A3B-GGUF` (UD-Q4_K_XL)*
+
