@@ -89,7 +89,7 @@ QWEN_GGUF_REPO_ID: str = "unsloth/Qwen3.6-35B-A3B-GGUF"
 # La differenza è nella qualità: UD-Q4_K_XL ha layout layer ottimizzato per preservare accuratezza.
 # Modello GGUF da usare (default: UD-Q4_K_XL — Unsloth Dynamic 2.0, raccomandato)
 # Alternativa: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-QWEN_GGUF_WEIGHTS_FILENAME: str = "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf"
+QWEN_GGUF_WEIGHTS_FILENAME: str = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 QWEN_VISION_PROJECTOR_FILENAME: str = "mmproj-F16.gguf"
 QWEN_MODEL_API_NAME: str = "Qwen3.6"          # Value used in the chat-completion "model" field
 
