@@ -349,7 +349,7 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
         "--cache-prompt",                          # Reuse KV cache for system prompt
         "--batch-size", str(LLAMA_SERVER_BATCH_SIZE),   # Prefill batch size
         "--ubatch-size", str(LLAMA_SERVER_UBATCH_SIZE), # Micro-batch size
-        "--image-max-tokens", "1024",              # V3: cap vision tokens (from ~2000 → 1024, tune down to 560 if quality OK)
+        "--image-max-tokens", "560",               # V3: cap vision tokens (aggressive — validate OCR quality)
         "--image-min-tokens", "70",                # V3: minimum vision tokens for small images
         "--chat-template-kwargs",                  # Disable thinking mode (official method)
         '{"enable_thinking":false}',               # from Unsloth docs + HuggingFace model card
