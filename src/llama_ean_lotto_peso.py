@@ -1111,18 +1111,40 @@ def write_batch_report(
             n = len(batch_processing_results)
             if n > 0:
                 avg_ms = pipeline_elapsed_sec * 1000 / n
-                f.write(f"**Average per image:** {avg_ms:.0f} ms  \n")
+                f.write(f"**Average per image (wall-clock):** {avg_ms:.0f} ms  \n")
+            if success_count > 0:
+                # Average of only successful inferences (excludes failed images)
+                success_total_ms = sum(
+                    r["timing"]["total_ms"] for r in batch_processing_results
+                    if not (
+                        r["text"].startswith("API Error")
+                        or r["text"].startswith("YOLO inference error")
+                        or r["text"].startswith("No label detected")
+                        or r["text"].startswith("Image crop failed")
+                    )
+                )
+                f.write(f"**Average per image (successful only):** {success_total_ms / success_count:.0f} ms  \n")
             f.write("\n---\n\n")
 
             # ---- Timing Summary -----------------------------------------------------------------
             f.write("## Timing Summary\n\n")
 
-            # Collect timing arrays (only successful results)
+            # Collect timing arrays — only from SUCCESSFUL results so failed images
+            # (with 0.0ms crop/ocr) don't pollute min/avg calculations.
             timing_keys = ["load_ms", "barcode_ms", "yolo_ms", "crop_ms", "ocr_ms", "total_ms"]
             timing_labels = ["Load", "Barcode", "YOLO OBB", "Crop", "OCR", "**Total**"]
             timing_data: dict[str, list[float]] = {k: [] for k in timing_keys}
 
             for result in batch_processing_results:
+                text = result["text"]
+                is_error = (
+                    text.startswith("API Error")
+                    or text.startswith("YOLO inference error")
+                    or text.startswith("No label detected")
+                    or text.startswith("Image crop failed")
+                )
+                if is_error:
+                    continue  # Skip failed results in timing stats
                 for k in timing_keys:
                     timing_data[k].append(result["timing"][k])
 
