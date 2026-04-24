@@ -101,8 +101,8 @@ LLAMA_SERVER_CPU_THREADS: int = 8             # With full GPU offload, 8 threads
 LLAMA_SERVER_SHUTDOWN_TIMEOUT_SEC: float = 10.0
 LLAMA_SERVER_READY_POLL_SEC: float = 5.0       # Sleep between readiness probes during boot
 LLAMA_SERVER_BOOT_TIMEOUT_SEC: float = 600.0   # 10 min: includes first-time GGUF download (~22 GB)
-LLAMA_SERVER_BATCH_SIZE: int = 2048            # Batch size for prefill acceleration
-LLAMA_SERVER_UBATCH_SIZE: int = 512            # Micro-batch size
+LLAMA_SERVER_BATCH_SIZE: int = 4096            # V3: bigger prefill chunks on RTX 6000 PRO (96 GB VRAM)
+LLAMA_SERVER_UBATCH_SIZE: int = 4096           # V3: must be >= --image-max-tokens (560) for vision
 
 # --- Transcription API settings ---
 TRANSCRIPTION_HTTP_TIMEOUT_SEC: float = 120.0
@@ -146,10 +146,11 @@ PYZBAR_MAX_DIMENSION: int = 1500
 # Smaller images = less base64 data = faster prefill in llama-server.
 # Dimensione massima del crop prima del base64 encoding (default: 1280)
 # Ridurre per immagini molto grandi (es. 800) = meno base64 = prefill più veloce
-CROP_MAX_DIMENSION: int = 1280
+CROP_MAX_DIMENSION: int = 800                  # V3: smaller = fewer vision tokens + faster crop
 
 # JPEG quality for in-memory encoding (0-100, higher = larger file + more quality)
-CROP_JPEG_QUALITY: int = 90
+# V3: 75 produces ~30-40% smaller base64 payloads, negligible quality loss for text
+CROP_JPEG_QUALITY: int = 75
 
 # --- Barcode decoding settings ---
 # Barcode types that encode a standard retail EAN/UPC product code.
@@ -349,6 +350,8 @@ def ensure_llama_server_running(llama_server_base_url: str) -> None:
         "--cache-prompt",                          # Reuse KV cache for system prompt
         "--batch-size", str(LLAMA_SERVER_BATCH_SIZE),   # Prefill batch size
         "--ubatch-size", str(LLAMA_SERVER_UBATCH_SIZE), # Micro-batch size
+        "--image-max-tokens", "1024",              # V3: cap vision tokens (from ~2000 → 1024, tune down to 560 if quality OK)
+        "--image-min-tokens", "70",                # V3: minimum vision tokens for small images
         "--chat-template-kwargs",                  # Disable thinking mode (official method)
         '{"enable_thinking":false}',               # from Unsloth docs + HuggingFace model card
     ]
@@ -610,40 +613,74 @@ def _deskew_crop_obb(
     bbox_rotation_degrees: float = math.degrees(obb_rotation_radians)
 
     # V2: Downscale image before warpAffine if it exceeds MAX_WARP_DIM.
-    # The final crop will be resized to CROP_MAX_DIMENSION (1280px) anyway,
-    # so doing warpAffine on a smaller image saves CPU time on large photos.
+    # The final crop will be resized to CROP_MAX_DIMENSION (800px) anyway,
+    # so doing warpAffine on a smaller image saves time on large photos.
     MAX_WARP_DIM: int = 2048
     scale_factor: float = 1.0
     if max(image_height, image_width) > MAX_WARP_DIM:
         scale_factor = MAX_WARP_DIM / max(image_height, image_width)
-        source_image_bgr = cv2.resize(
-            source_image_bgr,
-            (int(image_width * scale_factor), int(image_height * scale_factor)),
-            interpolation=cv2.INTER_AREA,
+
+    # V3: Try GPU path (cv2.cuda) for warpAffine, fall back to CPU if unavailable.
+    # On RTX 6000 PRO, GPU warpAffine on a 2048px image takes ~2-5ms vs ~50ms on CPU.
+    _use_cuda: bool = (
+        hasattr(cv2, "cuda")
+        and cv2.cuda.getCudaEnabledDeviceCount() > 0
+    )
+
+    if _use_cuda:
+        # --- GPU path: upload once → resize + warpAffine in VRAM → download result ---
+        gpu_mat = cv2.cuda.GpuMat()
+        gpu_mat.upload(source_image_bgr)
+
+        if scale_factor < 1.0:
+            new_w = int(image_width * scale_factor)
+            new_h = int(image_height * scale_factor)
+            gpu_mat = cv2.cuda.resize(gpu_mat, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            image_height, image_width = new_h, new_w
+            obb_center_x *= scale_factor
+            obb_center_y *= scale_factor
+            obb_width *= scale_factor
+            obb_height *= scale_factor
+
+        deskew_rotation_matrix = cv2.getRotationMatrix2D(
+            center=(int(obb_center_x), int(obb_center_y)),
+            angle=bbox_rotation_degrees,
+            scale=1.0,
         )
-        image_height, image_width = source_image_bgr.shape[:2]
-        obb_center_x *= scale_factor
-        obb_center_y *= scale_factor
-        obb_width *= scale_factor
-        obb_height *= scale_factor
+        gpu_mat = cv2.cuda.warpAffine(
+            gpu_mat, deskew_rotation_matrix, (image_width, image_height),
+        )
+        # Download deskewed image back to CPU for numpy slice
+        deskewed_image_bgr = gpu_mat.download()
+    else:
+        # --- CPU fallback (original V2 path) ---
+        if scale_factor < 1.0:
+            source_image_bgr = cv2.resize(
+                source_image_bgr,
+                (int(image_width * scale_factor), int(image_height * scale_factor)),
+                interpolation=cv2.INTER_AREA,
+            )
+            image_height, image_width = source_image_bgr.shape[:2]
+            obb_center_x *= scale_factor
+            obb_center_y *= scale_factor
+            obb_width *= scale_factor
+            obb_height *= scale_factor
 
-    # Build a 2-D affine rotation matrix that rotates the image around (xc, yc) by
-    # bbox_rotation_degrees degrees.  cv2.getRotationMatrix2D uses a positive angle
-    # for CCW rotation – which is the correct direction to "undo" a CCW tilt.
-    deskew_rotation_matrix: cv2.Mat = cv2.getRotationMatrix2D(
-        center=(int(obb_center_x), int(obb_center_y)),
-        angle=bbox_rotation_degrees,
-        scale=1.0,
-    )
+        # Build a 2-D affine rotation matrix that rotates the image around (xc, yc) by
+        # bbox_rotation_degrees degrees.  cv2.getRotationMatrix2D uses a positive angle
+        # for CCW rotation – which is the correct direction to "undo" a CCW tilt.
+        deskew_rotation_matrix = cv2.getRotationMatrix2D(
+            center=(int(obb_center_x), int(obb_center_y)),
+            angle=bbox_rotation_degrees,
+            scale=1.0,
+        )
 
-    # Apply the rotation to the whole image.  The output size equals the input size;
-    # pixels that fall outside are clipped silently, which is safe here because the
-    # label region is guaranteed to be well inside the image bounds.
-    deskewed_image_bgr: cv2.Mat = cv2.warpAffine(
-        src=source_image_bgr,
-        M=deskew_rotation_matrix,
-        dsize=(image_width, image_height),
-    )
+        # Apply the rotation to the whole image.
+        deskewed_image_bgr = cv2.warpAffine(
+            src=source_image_bgr,
+            M=deskew_rotation_matrix,
+            dsize=(image_width, image_height),
+        )
 
     # After deskewing, the OBB is now axis-aligned, so a plain NumPy slice centred on
     # the same (xc, yc) yields the upright crop.
