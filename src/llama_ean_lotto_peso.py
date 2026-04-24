@@ -56,8 +56,14 @@ import subprocess
 import atexit
 import sys
 import time
-import base64
 import math
+
+# SIMD-accelerated base64 (~4× faster than stdlib on large payloads).
+# Falls back to stdlib if pybase64 is not installed.
+try:
+    import pybase64 as base64
+except ImportError:
+    import base64
 
 # --------------------------------------------------------------------------------------------------
 # Third-party imports
@@ -697,6 +703,10 @@ def _deskew_crop_obb(
 
     cropped_label_bgr: cv2.Mat = deskewed_image_bgr[y1_clipped:y2_clipped, x1_clipped:x2_clipped]
 
+    # V3: Resize crop to CROP_MAX_DIMENSION here (single resize point).
+    # Avoids a redundant second resize inside _transcribe_label_image.
+    cropped_label_bgr = _resize_image_max_dimension(cropped_label_bgr, CROP_MAX_DIMENSION)
+
     return cropped_label_bgr
 
 
@@ -728,11 +738,9 @@ def _transcribe_label_image(
     Raises:
         RuntimeError: If all retry attempts fail.
     """
-    # Resize crop to max dimension (reduces base64 payload size and prefill time).
-    resized_crop = _resize_image_max_dimension(cropped_label_bgr, CROP_MAX_DIMENSION)
-
+    # Crop is already resized to CROP_MAX_DIMENSION inside _deskew_crop_obb.
     # In-memory JPEG encoding → base64 (no disk I/O).
-    ok, buf = cv2.imencode('.jpg', resized_crop, [cv2.IMWRITE_JPEG_QUALITY, CROP_JPEG_QUALITY])
+    ok, buf = cv2.imencode('.jpg', cropped_label_bgr, [cv2.IMWRITE_JPEG_QUALITY, CROP_JPEG_QUALITY])
     if not ok:
         raise RuntimeError("cv2.imencode failed for cropped label")
     base64_encoded_crop: str = base64.b64encode(buf).decode("utf-8")
@@ -1337,36 +1345,37 @@ def main() -> None:
             )
 
             # -----------------------------------------------------------------------------------------
-            # Write per-image transcript (checkpointing so partial results survive crashes)
+            # Write per-image transcript async (I/O doesn't block the hot loop)
             # -----------------------------------------------------------------------------------------
+            def _write_transcript(
+                path: Path, img_name: str, result_dict: dict, timing: dict
+            ) -> None:
+                try:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(f"# Transcription for {img_name}\n\n")
+                        fh.write(f"- **EAN:** {result_dict['ean'] or 'None'}\n")
+                        fh.write(f"- **Rotation Detected:** {result_dict['rotation']}°\n")
+                        fh.write(
+                            f"- **Timing:** {timing['total_ms']}ms "
+                            f"(load={timing['load_ms']}ms, barcode={timing['barcode_ms']}ms, "
+                            f"yolo={timing['yolo_ms']}ms, crop={timing['crop_ms']}ms, "
+                            f"ocr={timing['ocr_ms']}ms)\n\n"
+                        )
+                        fh.write(f"```markdown\n{result_dict['text']}\n```\n")
+                except Exception as exc:
+                    logger.error(
+                        "Failed to write individual transcript",
+                        transcript_path=str(path),
+                        error=str(exc),
+                    )
+
             individual_transcript_path: Path = (
                 cropped_labels_dir / f"transcript_{input_image_path.stem}.md"
             )
-            try:
-                with open(individual_transcript_path, "w", encoding="utf-8") as transcript_file_handle:
-                    transcript_file_handle.write(
-                        f"# Transcription for {input_image_path.name}\n\n"
-                    )
-                    transcript_file_handle.write(f"- **EAN:** {result['ean'] or 'None'}\n")
-                    transcript_file_handle.write(
-                        f"- **Rotation Detected:** {result['rotation']}°\n"
-                    )
-                    transcript_file_handle.write(
-                        f"- **Timing:** {t['total_ms']}ms "
-                        f"(load={t['load_ms']}ms, barcode={t['barcode_ms']}ms, yolo={t['yolo_ms']}ms, "
-                        f"crop={t['crop_ms']}ms, ocr={t['ocr_ms']}ms)\n\n"
-                    )
-                    transcript_file_handle.write(f"```markdown\n{result['text']}\n```\n")
-                logger.debug(
-                    "Saved individual transcript",
-                    transcript_path=str(individual_transcript_path),
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to write individual transcript",
-                    transcript_path=str(individual_transcript_path),
-                    error=str(exc),
-                )
+            prefetch_pool.submit(
+                _write_transcript, individual_transcript_path,
+                input_image_path.name, result, t,
+            )
 
     # ----------------------------------------------------------------------------------------------
     # Write the consolidated batch report
